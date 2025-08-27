@@ -1719,8 +1719,25 @@ def update_params():
         print(f"[API] Update params ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
+def get_server_ip():
+    """Get the server's IP address"""
+    try:
+        import socket
+        # Connect to a remote address to determine local IP
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+        return local_ip
+    except Exception:
+        return "Unable to determine IP"
+
 if __name__ == "__main__":
     print("=== STARTING TRADEPRO BOT ===")
+    
+    # Output IP address
+    server_ip = get_server_ip()
+    print(f"🌐 Server IP Address: {server_ip}")
+    
     print(f"Dashboard will be available at: http://0.0.0.0:5000")
     print("Initializing bot core...")
 
