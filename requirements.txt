@@ -1,0 +1,8 @@
+flask
+gunicorn
+python-binance
+python-dotenv
+flask-cors
+binance
+websocket-client
+websocket-client
