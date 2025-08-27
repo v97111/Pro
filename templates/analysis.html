@@ -1,0 +1,597 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Analytics - TradePro</title>
+    <style>
+        :root {
+            --primary: #007AFF;
+            --primary-dark: #0056CC;
+            --success: #34C759;
+            --danger: #FF3B30;
+            --warning: #FF9500;
+            --background: #000000;
+            --card: #1C1C1E;
+            --card-light: #2C2C2E;
+            --text-primary: #FFFFFF;
+            --text-secondary: #98989D;
+            --text-tertiary: #636366;
+            --separator: #38383A;
+            --blur: rgba(28, 28, 30, 0.8);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif;
+            background: var(--background);
+            color: var(--text-primary);
+            overflow-x: hidden;
+        }
+
+        .navbar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 88px;
+            background: var(--blur);
+            backdrop-filter: blur(20px);
+            z-index: 1000;
+            display: flex;
+            align-items: flex-end;
+            padding: 0 20px 12px;
+            border-bottom: 0.5px solid var(--separator);
+        }
+
+        .nav-content {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 100%;
+        }
+
+        .nav-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .back-btn {
+            background: var(--card-light);
+            color: var(--text-primary);
+            border: none;
+            border-radius: 20px;
+            padding: 8px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .container {
+            padding: 108px 20px 40px;
+            max-width: 428px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: var(--card);
+            border-radius: 16px;
+            margin-bottom: 20px;
+            overflow: hidden;
+        }
+
+        .card-header {
+            padding: 20px 20px 0;
+        }
+
+        .card-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .card-content {
+            padding: 20px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+
+        .stats-grid-3 {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 12px;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+
+        .stat-value-small {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+
+        .stat-label {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .stat-positive {
+            color: var(--success);
+        }
+
+        .stat-negative {
+            color: var(--danger);
+        }
+
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--separator);
+            border-top: 2px solid var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 12px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .symbol-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .symbol-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            background: var(--card-light);
+            border-radius: 12px;
+        }
+
+        .symbol-name {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .symbol-stats {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            font-size: 14px;
+        }
+
+        .win-rate {
+            color: var(--text-secondary);
+        }
+
+        .pnl {
+            font-weight: 600;
+        }
+
+        .recommendations {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .recommendation {
+            padding: 16px;
+            background: var(--card-light);
+            border-radius: 12px;
+            border-left: 4px solid var(--primary);
+        }
+
+        .recommendation.high {
+            border-left-color: var(--danger);
+        }
+
+        .recommendation.medium {
+            border-left-color: var(--warning);
+        }
+
+        .recommendation.low {
+            border-left-color: var(--success);
+        }
+
+        .rec-title {
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+
+        .rec-message {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+
+        .rec-action {
+            color: var(--primary);
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .time-chart {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(60px, 1fr));
+            gap: 8px;
+            margin-top: 16px;
+        }
+
+        .time-slot {
+            text-align: center;
+            padding: 8px 4px;
+            background: var(--card-light);
+            border-radius: 8px;
+        }
+
+        .time-hour {
+            font-size: 11px;
+            color: var(--text-tertiary);
+            margin-bottom: 4px;
+        }
+
+        .time-pnl {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .refresh-btn {
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 20px;
+            padding: 8px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .refresh-btn:active {
+            transform: scale(0.98);
+        }
+    </style>
+</head>
+<body>
+    <div class="navbar">
+        <div class="nav-content">
+            <div class="nav-title">Analytics</div>
+            <div style="display: flex; gap: 12px;">
+                <button class="refresh-btn" onclick="loadAnalytics()">
+                    <span id="refreshIcon">🔄</span> Refresh
+                </button>
+                <a href="/" class="back-btn">← Back</a>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Performance Overview -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Performance Overview</div>
+            </div>
+            <div class="card-content">
+                <div id="loadingState" class="loading">
+                    <div class="spinner"></div>
+                    Loading analytics...
+                </div>
+                <div id="performanceStats" class="stats-grid" style="display: none;">
+                    <div class="stat-item">
+                        <div class="stat-value" id="totalTrades">-</div>
+                        <div class="stat-label">Total Trades</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="winRate">-</div>
+                        <div class="stat-label">Win Rate</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="avgPnL">-</div>
+                        <div class="stat-label">Avg P&L</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="totalPnL">-</div>
+                        <div class="stat-label">Total P&L</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Risk Metrics -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Risk Analysis</div>
+            </div>
+            <div class="card-content">
+                <div id="riskMetrics" class="stats-grid-3">
+                    <div class="stat-item">
+                        <div class="stat-value-small" id="volatility">-</div>
+                        <div class="stat-label">Volatility</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value-small" id="maxDrawdown">-</div>
+                        <div class="stat-label">Max Drawdown</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value-small" id="sharpeRatio">-</div>
+                        <div class="stat-label">Sharpe Ratio</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value-small" id="bestTrade">-</div>
+                        <div class="stat-label">Best Trade</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value-small" id="worstTrade">-</div>
+                        <div class="stat-label">Worst Trade</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value-small" id="avgDuration">-</div>
+                        <div class="stat-label">Avg Duration</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Performance by Time -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Performance by Time of Day</div>
+            </div>
+            <div class="card-content">
+                <div id="timeChart" class="time-chart">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Analyzing time patterns...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Top Performers -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Symbol Performance</div>
+            </div>
+            <div class="card-content">
+                <div id="symbolPerformance" class="symbol-list">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Analyzing symbols...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recommendations -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Recommendations</div>
+            </div>
+            <div class="card-content">
+                <div id="recommendations" class="recommendations">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Generating recommendations...
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function loadAnalytics() {
+            const refreshIcon = document.getElementById('refreshIcon');
+            const originalIcon = refreshIcon.textContent;
+            
+            try {
+                // Show loading animation
+                refreshIcon.textContent = '⏳';
+                
+                const response = await fetch('/api/analysis/performance');
+                const data = await response.json();
+
+                if (data.error) {
+                    document.getElementById('loadingState').innerHTML = 
+                        `<div style="text-align: center; color: var(--danger);">Error: ${data.error}</div>`;
+                    return;
+                }
+
+                // Hide loading and show stats
+                document.getElementById('loadingState').style.display = 'none';
+                document.getElementById('performanceStats').style.display = 'grid';
+
+                // Update performance stats
+                document.getElementById('totalTrades').textContent = data.total_trades || 0;
+                
+                const winRateEl = document.getElementById('winRate');
+                winRateEl.textContent = `${data.win_rate || 0}%`;
+                winRateEl.className = `stat-value ${(data.win_rate || 0) >= 50 ? 'stat-positive' : 'stat-negative'}`;
+                
+                const avgPnLEl = document.getElementById('avgPnL');
+                avgPnLEl.textContent = `${(data.avg_pnl || 0).toFixed(2)}%`;
+                avgPnLEl.className = `stat-value ${(data.avg_pnl || 0) >= 0 ? 'stat-positive' : 'stat-negative'}`;
+                
+                const totalPnLEl = document.getElementById('totalPnL');
+                totalPnLEl.textContent = `${(data.total_pnl || 0).toFixed(2)}%`;
+                totalPnLEl.className = `stat-value ${(data.total_pnl || 0) >= 0 ? 'stat-positive' : 'stat-negative'}`;
+
+                // Update risk metrics
+                if (data.risk_metrics) {
+                    const risk = data.risk_metrics;
+                    document.getElementById('volatility').textContent = `${risk.volatility || 0}%`;
+                    
+                    const maxDrawdownEl = document.getElementById('maxDrawdown');
+                    maxDrawdownEl.textContent = `${risk.max_drawdown || 0}%`;
+                    maxDrawdownEl.className = `stat-value-small ${(risk.max_drawdown || 0) > 5 ? 'stat-negative' : 'stat-positive'}`;
+                    
+                    const sharpeEl = document.getElementById('sharpeRatio');
+                    sharpeEl.textContent = (risk.sharpe_ratio || 0).toFixed(2);
+                    sharpeEl.className = `stat-value-small ${(risk.sharpe_ratio || 0) > 1 ? 'stat-positive' : 'stat-negative'}`;
+                    
+                    const bestTradeEl = document.getElementById('bestTrade');
+                    bestTradeEl.textContent = `+${risk.best_trade || 0}%`;
+                    bestTradeEl.className = 'stat-value-small stat-positive';
+                    
+                    const worstTradeEl = document.getElementById('worstTrade');
+                    worstTradeEl.textContent = `${risk.worst_trade || 0}%`;
+                    worstTradeEl.className = 'stat-value-small stat-negative';
+                    
+                    document.getElementById('avgDuration').textContent = `${data.avg_duration || 0}m`;
+                }
+
+                // Render time performance
+                renderTimePerformance(data.performance_by_time || {});
+
+                // Render symbol performance
+                renderSymbolPerformance(data.symbol_stats || {});
+
+                // Render recommendations
+                renderRecommendations(data.recommendations || []);
+
+                refreshIcon.textContent = '✅';
+                setTimeout(() => {
+                    refreshIcon.textContent = originalIcon;
+                }, 2000);
+
+            } catch (error) {
+                document.getElementById('loadingState').innerHTML = 
+                    `<div style="text-align: center; color: var(--danger);">Failed to load analytics: ${error.message}</div>`;
+                
+                refreshIcon.textContent = '❌';
+                setTimeout(() => {
+                    refreshIcon.textContent = originalIcon;
+                }, 2000);
+            }
+        }
+
+        function renderTimePerformance(timeData) {
+            const container = document.getElementById('timeChart');
+            
+            if (!timeData || Object.keys(timeData).length === 0) {
+                container.innerHTML = `
+                    <div style="text-align: center; color: var(--text-secondary); padding: 20px; grid-column: 1 / -1;">
+                        No time-based data available
+                    </div>`;
+                return;
+            }
+
+            const sortedTimes = Object.entries(timeData)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .slice(0, 12); // Show top 12 hours
+
+            container.innerHTML = sortedTimes.map(([time, stats]) => {
+                const pnlClass = stats.avg_pnl >= 0 ? 'stat-positive' : 'stat-negative';
+                return `
+                    <div class="time-slot">
+                        <div class="time-hour">${time}</div>
+                        <div class="time-pnl ${pnlClass}">
+                            ${stats.avg_pnl >= 0 ? '+' : ''}${stats.avg_pnl.toFixed(1)}%
+                        </div>
+                        <div style="font-size: 10px; color: var(--text-tertiary);">
+                            ${stats.trades} trades
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderSymbolPerformance(symbolStats) {
+            const container = document.getElementById('symbolPerformance');
+            
+            if (!symbolStats || Object.keys(symbolStats).length === 0) {
+                container.innerHTML = `
+                    <div style="text-align: center; color: var(--text-secondary); padding: 20px;">
+                        No symbol data available
+                    </div>`;
+                return;
+            }
+
+            const sortedSymbols = Object.entries(symbolStats)
+                .filter(([, stats]) => stats.total_trades > 0)
+                .sort(([, a], [, b]) => b.avg_pnl - a.avg_pnl)
+                .slice(0, 10);
+
+            container.innerHTML = sortedSymbols.map(([symbol, stats]) => `
+                <div class="symbol-item">
+                    <div class="symbol-name">${symbol}</div>
+                    <div class="symbol-stats">
+                        <span class="win-rate">${stats.win_rate.toFixed(0)}%</span>
+                        <span class="win-rate">${stats.total_trades} trades</span>
+                        <span class="pnl ${stats.avg_pnl >= 0 ? 'stat-positive' : 'stat-negative'}">
+                            ${stats.avg_pnl >= 0 ? '+' : ''}${stats.avg_pnl.toFixed(2)}%
+                        </span>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function renderRecommendations(recommendations) {
+            const container = document.getElementById('recommendations');
+            
+            if (!recommendations || recommendations.length === 0) {
+                container.innerHTML = `
+                    <div style="text-align: center; color: var(--text-secondary); padding: 20px;">
+                        No recommendations at this time. Your strategy is performing well!
+                    </div>`;
+                return;
+            }
+
+            container.innerHTML = recommendations.map(rec => `
+                <div class="recommendation ${rec.priority || 'medium'}">
+                    <div class="rec-title">${rec.type.replace('_', ' ').toUpperCase()} - ${rec.priority?.toUpperCase() || 'MEDIUM'} PRIORITY</div>
+                    <div class="rec-message">${rec.message}</div>
+                    <div class="rec-action">💡 ${rec.action}</div>
+                </div>
+            `).join('');
+        }
+
+        // Load analytics on page load
+        loadAnalytics();
+        
+        // Auto-refresh every 30 seconds
+        setInterval(loadAnalytics, 30000);
+    </script>
+</body>
+</html>
