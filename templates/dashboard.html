@@ -631,7 +631,7 @@
         <div class="nav-content">
             <div class="nav-title">TradePro</div>
             <div class="nav-actions">
-                <button class="btn btn-primary" onclick="reconnectAPI()" id="reconnectBtn">Reconnect API</button>
+                <button class="btn btn-primary" onclick="startTrading()" id="startBtn">Start Trading</button>
                 <button class="btn btn-danger" onclick="confirmStopCore()">Stop</button>
             </div>
         </div>
@@ -1002,19 +1002,19 @@
             }
         }
 
-        async function reconnectAPI() {
-            const btn = document.getElementById('reconnectBtn');
+        async function startTrading() {
+            const btn = document.getElementById('startBtn');
             const originalText = btn.textContent;
             
             try {
-                btn.textContent = 'Reconnecting...';
+                btn.textContent = 'Starting...';
                 btn.disabled = true;
                 
-                const response = await post('/api/reconnect-api');
+                const response = await post('/api/start-trading');
                 const data = await response.json();
                 
-                if (data.status === 'reconnected' || data.status === 'already_connected') {
-                    btn.textContent = '✓ Connected';
+                if (data.status === 'started') {
+                    btn.textContent = '✓ Trading Started';
                     btn.style.background = 'var(--success)';
                     
                     // Show server IP in console
@@ -1030,17 +1030,21 @@
                     }
                     
                     alert(`✅ ${data.message}\n💰 Balance: ${data.balance || 'Unknown'}\n🌐 IP: ${data.server_ip || 'Unknown'}`);
+                    
+                    // Start auto-refresh after successful start
+                    await refreshData(true);
+                    
                 } else {
                     btn.textContent = '✗ Failed';
                     btn.style.background = 'var(--danger)';
-                    alert(`❌ Reconnection failed: ${data.error || 'Unknown error'}\n\n💡 ${data.suggestion || 'Please check your API keys and IP whitelist'}`);
+                    alert(`❌ Failed to start trading: ${data.error || 'Unknown error'}\n\n💡 ${data.suggestion || 'Please check your API keys and IP whitelist'}`);
                 }
                 
             } catch (error) {
                 btn.textContent = '✗ Failed';
                 btn.style.background = 'var(--danger)';
-                console.error('Reconnect failed:', error);
-                alert(`❌ Reconnection failed: ${error.message}`);
+                console.error('Start trading failed:', error);
+                alert(`❌ Failed to start trading: ${error.message}\n\n💡 Make sure you've whitelisted the server IP in Binance`);
             } finally {
                 // Reset button after 3 seconds
                 setTimeout(() => {
@@ -1520,62 +1524,47 @@
         let initRetries = 0;
         async function initialize() {
             try {
-                logHealth(`Initialization attempt ${initRetries + 1}/5`);
-                console.log('🚀 Starting TradePro initialization...');
+                logHealth('Dashboard initialization...');
+                console.log('🚀 TradePro Dashboard Ready');
 
-                logHealth('Starting bot core...');
-                const startResponse = await post('/api/start-core');
-                console.log('✓ Bot core start requested');
+                // Load server info to show IP immediately
+                try {
+                    const serverResponse = await fetch('/api/server-info');
+                    const serverData = await serverResponse.json();
+                    if (serverData.ip) {
+                        console.log(`🌐 Server IP: ${serverData.ip}`);
+                        logHealth(`🌐 Server IP: ${serverData.ip} - Whitelist this IP in Binance before starting`);
+                    }
+                } catch (e) {
+                    logHealth('Could not fetch server IP');
+                }
 
-                // Wait longer for server to fully initialize
-                logHealth('Waiting for bot core to initialize...');
-                await new Promise(resolve => setTimeout(resolve, 3000));
+                // Show initial state
+                document.getElementById('balance').textContent = 'Not Started';
+                document.getElementById('balance').style.color = 'var(--warning)';
 
-                logHealth('Loading initial data...');
-                await refreshData(true); // Load parameters on initial page load
-                console.log('✓ Portfolio data loaded');
-
-                // Force immediate trade history refresh
+                // Set up basic refresh for trades (in case there are historical trades)
                 await refreshTrades();
-                console.log('✓ Trade history loaded');
+                console.log('✓ Historical trades loaded');
 
-                // Force another refresh after a short delay to catch any new trades
-                setTimeout(async () => {
-                    await refreshTrades();
-                    console.log('✓ Trade history double-checked');
-                }, 2000);
+                logHealth('✅ Dashboard ready! Use "Start Trading" button after whitelisting your IP');
+                console.log('📋 Please whitelist your server IP in Binance, then click "Start Trading"');
 
-                logHealth('✅ Bot initialized successfully! Starting real-time updates...');
-                console.log('🔄 Starting refresh intervals...');
-
-                // Start refresh intervals with better spacing
-                const portfolioInterval = setInterval(refreshData, 2000);    // Every 2s
-                const tradesInterval = setInterval(refreshTrades, 10000);    // Every 10s  
-                const debugInterval = setInterval(refreshDebug, 3000);       // Every 3s when enabled
+                // Only start light refresh intervals (no portfolio data until trading starts)
+                const tradesInterval = setInterval(refreshTrades, 30000);    // Every 30s for historical trades
+                const debugInterval = setInterval(refreshDebug, 5000);       // Every 5s when enabled
 
                 // Store intervals for cleanup if needed
-                window.refreshIntervals = { portfolioInterval, tradesInterval, debugInterval };
+                window.refreshIntervals = { tradesInterval, debugInterval };
 
             } catch (e) {
-                initRetries++;
-                const errorMsg = `Initialization attempt ${initRetries} failed: ${e.message}`;
+                const errorMsg = `Dashboard initialization failed: ${e.message}`;
                 console.error('❌', errorMsg);
                 logHealth(errorMsg);
-
-                if (initRetries < 5) {
-                    const retryDelay = Math.min(2000 * initRetries, 10000); // Progressive backoff
-                    console.log(`⏳ Retrying in ${retryDelay/1000}s...`);
-                    logHealth(`Retrying initialization in ${retryDelay/1000} seconds...`);
-                    setTimeout(initialize, retryDelay);
-                } else {
-                    const finalError = '💀 FAILED: Could not initialize after 5 attempts';
-                    console.error(finalError);
-                    logHealth(finalError);
-
-                    // Show error in UI
-                    document.getElementById('balance').textContent = 'Connection Failed';
-                    document.getElementById('balance').style.color = 'var(--danger)';
-                }
+                
+                // Show basic error state
+                document.getElementById('balance').textContent = 'Dashboard Error';
+                document.getElementById('balance').style.color = 'var(--danger)';
             }
         }
 
