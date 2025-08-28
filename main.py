@@ -1630,7 +1630,8 @@ def api_debug_export():
 @app.route("/analysis")
 def analysis_page():
     try:
-        get_bot_instance() # Ensure bot is initialized
+        # Don't require bot to be started to view analytics page
+        # The page itself will handle the "not started" state via API calls
         return render_template("analysis.html")
     except Exception as e:
         print(f"[Analysis Page] Error: {e}")
@@ -1639,8 +1640,13 @@ def analysis_page():
 @app.get("/api/analysis/performance")
 def api_analysis_performance():
     try:
-        bot_instance = get_bot_instance()
-        analysis = bot_instance.trade_analyzer.get_comprehensive_analysis()
+        # Check if bot is started, if not use standalone analyzer
+        if bot is None:
+            # Create standalone analyzer to read from CSV file
+            analyzer = TradeAnalyzer(LOG_FILE)
+            analysis = analyzer.get_comprehensive_analysis()
+        else:
+            analysis = bot.trade_analyzer.get_comprehensive_analysis()
         
         # Ensure all required fields are present and properly formatted
         if 'error' not in analysis:
@@ -1667,7 +1673,7 @@ def api_analysis_performance():
         import traceback
         traceback.print_exc()
         return jsonify({
-            "error": str(e),
+            "error": f"Analysis failed: {str(e)}",
             "total_trades": 0,
             "win_rate": 0.0,
             "avg_pnl": 0.0,
@@ -1849,36 +1855,48 @@ def api_server_info():
         }), 500
 
 def get_server_ip():
-    """Get the server's internal IP address"""
+    """Get the server's public IP address for Binance whitelisting"""
     try:
-        import socket
-        import subprocess
+        # Method 1: Try multiple external IP services
+        ip_services = [
+            "https://api.ipify.org",
+            "https://ipinfo.io/ip", 
+            "https://icanhazip.com",
+            "https://ident.me"
+        ]
         
-        # Try to get hostname first
-        hostname = socket.gethostname()
+        for service in ip_services:
+            try:
+                response = requests.get(service, timeout=5)
+                if response.status_code == 200:
+                    public_ip = response.text.strip()
+                    if public_ip and '.' in public_ip:
+                        return f"{public_ip} (public IP for Binance)"
+            except Exception:
+                continue
         
-        # Get all network interfaces
-        result = subprocess.run(['hostname', '-I'], capture_output=True, text=True)
-        if result.returncode == 0:
-            # Return the first IP address (usually the main interface)
-            ips = result.stdout.strip().split()
-            if ips:
-                return f"{ips[0]} (hostname: {hostname})"
+        # Method 2: Try httpbin.org (returns JSON)
+        try:
+            response = requests.get("https://httpbin.org/ip", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                public_ip = data.get('origin', '').split(',')[0].strip()
+                if public_ip:
+                    return f"{public_ip} (public IP for Binance)"
+        except Exception:
+            pass
         
-        # Fallback: try socket method
-        local_ip = socket.gethostbyname(hostname)
-        return f"{local_ip} (hostname: {hostname})"
-        
-    except Exception as e:
-        # Last resort: try the original method
+        # Fallback: Show internal IP with warning
         try:
             import socket
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-            return f"{local_ip} (detected)"
+            hostname = socket.gethostname()
+            local_ip = socket.gethostbyname(hostname)
+            return f"⚠️ {local_ip} (INTERNAL IP - NOT for Binance! See deployment guide)"
         except Exception:
-            return "Unable to determine server IP"
+            return "❌ Unable to determine public IP - check deployment guide"
+        
+    except Exception as e:
+        return f"❌ Error getting public IP: {e}"
 
 if __name__ == "__main__":
     print("=== STARTING TRADEPRO BOT ===")
