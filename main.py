@@ -1719,17 +1719,73 @@ def update_params():
         print(f"[API] Update params ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.get("/api/server-info")
+def api_server_info():
+    try:
+        server_ip = get_server_ip()
+        
+        # Parse the IP and hostname from the formatted string
+        ip_part = server_ip.split(" (")[0] if " (" in server_ip else server_ip
+        hostname_part = ""
+        if " (hostname: " in server_ip:
+            hostname_part = server_ip.split(" (hostname: ")[1].rstrip(")")
+        elif " (detected)" in server_ip:
+            hostname_part = "Auto-detected"
+        
+        # Try to determine region based on environment
+        region = "Unknown"
+        if os.getenv('REPL_DEPLOYMENT'):
+            region = "Replit Deployment (USA)"
+        elif os.getenv('REPL_SLUG'):
+            region = "Replit Development (USA)"
+        
+        return jsonify({
+            "ip": ip_part,
+            "hostname": hostname_part,
+            "region": region,
+            "environment": "DEPLOYMENT" if os.getenv('REPL_DEPLOYMENT') else "DEVELOPMENT"
+        })
+    except Exception as e:
+        print(f"[API] Server info ERROR: {e}")
+        return jsonify({
+            "ip": "Unable to fetch",
+            "hostname": "Unknown", 
+            "region": "Unknown",
+            "environment": "Unknown",
+            "error": str(e)
+        }), 500
+
 def get_server_ip():
-    """Get the server's IP address"""
+    """Get the server's internal IP address"""
     try:
         import socket
-        # Connect to a remote address to determine local IP
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-        return local_ip
-    except Exception:
-        return "Unable to determine IP"
+        import subprocess
+        
+        # Try to get hostname first
+        hostname = socket.gethostname()
+        
+        # Get all network interfaces
+        result = subprocess.run(['hostname', '-I'], capture_output=True, text=True)
+        if result.returncode == 0:
+            # Return the first IP address (usually the main interface)
+            ips = result.stdout.strip().split()
+            if ips:
+                return f"{ips[0]} (hostname: {hostname})"
+        
+        # Fallback: try socket method
+        local_ip = socket.gethostbyname(hostname)
+        return f"{local_ip} (hostname: {hostname})"
+        
+    except Exception as e:
+        # Last resort: try the original method
+        try:
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+            return f"{local_ip} (detected)"
+        except Exception:
+            return "Unable to determine server IP"
 
 if __name__ == "__main__":
     print("=== STARTING TRADEPRO BOT ===")
