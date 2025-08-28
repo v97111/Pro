@@ -418,6 +418,25 @@
                 </div>
             </div>
         </div>
+
+        <!-- Server Information -->
+        <div class="card">
+            <div class="card-header">
+                <div class="card-title">Server Information</div>
+            </div>
+            <div class="card-content">
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-value" id="serverIP">-</div>
+                        <div class="stat-label">Server IP Address</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="serverRegion">-</div>
+                        <div class="stat-label">Region</div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -489,6 +508,9 @@
 
                 // Render recommendations
                 renderRecommendations(data.recommendations || []);
+
+                // Load server info
+                loadServerInfo();
 
                 refreshIcon.textContent = '✅';
                 setTimeout(() => {
@@ -585,6 +607,31 @@
                     <div class="rec-action">💡 ${rec.action}</div>
                 </div>
             `).join('');
+        }
+
+        async function loadServerInfo() {
+            try {
+                // Get server info from our local API
+                const response = await fetch('/api/server-info');
+                const data = await response.json();
+                
+                if (data.error) {
+                    document.getElementById('serverIP').textContent = 'Unable to fetch';
+                    document.getElementById('serverRegion').textContent = 'Unknown';
+                    console.error('Server info error:', data.error);
+                    return;
+                }
+                
+                // Display the actual server IP and hostname
+                const ipDisplay = data.hostname ? `${data.ip} (${data.hostname})` : data.ip;
+                document.getElementById('serverIP').textContent = ipDisplay;
+                document.getElementById('serverRegion').textContent = data.region || 'Unknown';
+                
+            } catch (error) {
+                document.getElementById('serverIP').textContent = 'Unable to fetch';
+                document.getElementById('serverRegion').textContent = 'Unknown';
+                console.error('Failed to load server info:', error);
+            }
         }
 
         // Load analytics on page load
