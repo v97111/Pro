@@ -1719,6 +1719,60 @@ def update_params():
         print(f"[API] Update params ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.post("/api/reconnect-api")
+def api_reconnect():
+    try:
+        global bot
+        if bot is None:
+            return jsonify({"error": "Bot not initialized"}), 400
+        
+        print("[API] Reconnecting to Binance API...")
+        
+        # Test current connection first
+        try:
+            test_response = bot._client.get_account()
+            return jsonify({
+                "status": "already_connected", 
+                "message": "API connection is already working",
+                "balance": f"{get_net_usdt_value(bot._client):.2f} USDT"
+            })
+        except Exception as conn_error:
+            print(f"[API] Current connection failed: {conn_error}")
+        
+        # Reinitialize the client
+        old_client = bot._client
+        bot._client = build_client()
+        
+        # Test new connection
+        try:
+            account_info = bot._client.get_account()
+            new_balance = get_net_usdt_value(bot._client)
+            bot.current_net_usdt = new_balance
+            
+            print(f"[API] Successfully reconnected to Binance API")
+            print(f"[API] New balance: {new_balance:.2f} USDT")
+            
+            return jsonify({
+                "status": "reconnected",
+                "message": "Successfully reconnected to Binance API",
+                "balance": f"{new_balance:.2f} USDT",
+                "server_ip": get_server_ip()
+            })
+            
+        except Exception as new_conn_error:
+            # Rollback to old client if new one fails
+            bot._client = old_client
+            print(f"[API] Reconnection failed, rolled back: {new_conn_error}")
+            
+            return jsonify({
+                "error": f"Reconnection failed: {new_conn_error}",
+                "suggestion": "Make sure you've whitelisted the server IP in Binance"
+            }), 400
+            
+    except Exception as e:
+        print(f"[API] Reconnect ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.get("/api/server-info")
 def api_server_info():
     try:
