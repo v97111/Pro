@@ -1144,6 +1144,15 @@ class FastCycleBot:
             if not self._running:
                 raise RuntimeError("Failed to start bot core.")
 
+        # Check if we have sufficient balance
+        try:
+            current_balance = get_net_usdt_value(self._client)
+            if current_balance < quote_amount:
+                raise RuntimeError(f"Insufficient balance. Available: {current_balance:.2f} USDT, Required: {quote_amount} USDT")
+        except Exception as e:
+            print(f"[WARN] Could not verify balance before adding worker: {e}")
+            # Continue anyway - let the worker handle the error when trading
+
         with self._lock:
             # Check worker limit
             if len(self._workers) >= self._max_workers:
@@ -1731,47 +1740,41 @@ def api_reconnect():
         # Test current connection first
         try:
             test_response = bot._client.get_account()
+            new_balance = get_net_usdt_value(bot._client)
             return jsonify({
                 "status": "already_connected", 
                 "message": "API connection is already working",
-                "balance": f"{get_net_usdt_value(bot._client):.2f} USDT"
+                "balance": f"{new_balance:.2f} USDT",
+                "server_ip": get_server_ip()
             })
         except Exception as conn_error:
             print(f"[API] Current connection failed: {conn_error}")
         
-        # Reinitialize the client
-        old_client = bot._client
+        # Create new client connection
+        print("[API] Creating new Binance client...")
         bot._client = build_client()
         
         # Test new connection
-        try:
-            account_info = bot._client.get_account()
-            new_balance = get_net_usdt_value(bot._client)
-            bot.current_net_usdt = new_balance
-            
-            print(f"[API] Successfully reconnected to Binance API")
-            print(f"[API] New balance: {new_balance:.2f} USDT")
-            
-            return jsonify({
-                "status": "reconnected",
-                "message": "Successfully reconnected to Binance API",
-                "balance": f"{new_balance:.2f} USDT",
-                "server_ip": get_server_ip()
-            })
-            
-        except Exception as new_conn_error:
-            # Rollback to old client if new one fails
-            bot._client = old_client
-            print(f"[API] Reconnection failed, rolled back: {new_conn_error}")
-            
-            return jsonify({
-                "error": f"Reconnection failed: {new_conn_error}",
-                "suggestion": "Make sure you've whitelisted the server IP in Binance"
-            }), 400
+        account_info = bot._client.get_account()
+        new_balance = get_net_usdt_value(bot._client)
+        bot.current_net_usdt = new_balance
+        
+        print(f"[API] Successfully reconnected to Binance API")
+        print(f"[API] New balance: {new_balance:.2f} USDT")
+        
+        return jsonify({
+            "status": "reconnected",
+            "message": "Successfully reconnected to Binance API",
+            "balance": f"{new_balance:.2f} USDT",
+            "server_ip": get_server_ip()
+        })
             
     except Exception as e:
-        print(f"[API] Reconnect ERROR: {e}")
-        return jsonify({"error": str(e)}), 500
+        print(f"[API] Reconnection failed: {e}")
+        return jsonify({
+            "error": f"Reconnection failed: {e}",
+            "suggestion": "Make sure you've whitelisted the server IP in Binance"
+        }), 400
 
 @app.get("/api/server-info")
 def api_server_info():
