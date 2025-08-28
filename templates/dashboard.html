@@ -631,6 +631,7 @@
         <div class="nav-content">
             <div class="nav-title">TradePro</div>
             <div class="nav-actions">
+                <button class="btn btn-primary" onclick="reconnectAPI()" id="reconnectBtn">Reconnect API</button>
                 <button class="btn btn-danger" onclick="confirmStopCore()">Stop</button>
             </div>
         </div>
@@ -998,6 +999,55 @@
         function confirmStopCore() {
             if (confirm('Are you sure you want to stop the trading bot? This will stop all active positions.')) {
                 post('/api/stop-core');
+            }
+        }
+
+        async function reconnectAPI() {
+            const btn = document.getElementById('reconnectBtn');
+            const originalText = btn.textContent;
+            
+            try {
+                btn.textContent = 'Reconnecting...';
+                btn.disabled = true;
+                
+                const response = await post('/api/reconnect-api');
+                const data = await response.json();
+                
+                if (data.status === 'reconnected' || data.status === 'already_connected') {
+                    btn.textContent = '✓ Connected';
+                    btn.style.background = 'var(--success)';
+                    
+                    // Show server IP in console
+                    if (data.server_ip) {
+                        console.log(`🌐 Server IP: ${data.server_ip}`);
+                        logHealth(`🌐 Server IP: ${data.server_ip}`);
+                    }
+                    
+                    // Show balance
+                    if (data.balance) {
+                        console.log(`💰 Balance: ${data.balance}`);
+                        logHealth(`💰 Current balance: ${data.balance}`);
+                    }
+                    
+                    alert(`✅ ${data.message}\n💰 Balance: ${data.balance || 'Unknown'}\n🌐 IP: ${data.server_ip || 'Unknown'}`);
+                } else {
+                    btn.textContent = '✗ Failed';
+                    btn.style.background = 'var(--danger)';
+                    alert(`❌ Reconnection failed: ${data.error || 'Unknown error'}\n\n💡 ${data.suggestion || 'Please check your API keys and IP whitelist'}`);
+                }
+                
+            } catch (error) {
+                btn.textContent = '✗ Failed';
+                btn.style.background = 'var(--danger)';
+                console.error('Reconnect failed:', error);
+                alert(`❌ Reconnection failed: ${error.message}`);
+            } finally {
+                // Reset button after 3 seconds
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.style.background = 'var(--primary)';
+                    btn.disabled = false;
+                }, 3000);
             }
         }
 
