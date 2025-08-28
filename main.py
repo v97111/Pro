@@ -1476,11 +1476,17 @@ class FastCycleBot:
 app = Flask(__name__, template_folder="templates")
 bot = None # Initialize bot to None
 
-# Helper function to get bot instance (no auto-creation)
+# Helper function to get or create bot instance
 def get_bot_instance():
     global bot
     if bot is None:
-        raise RuntimeError("Bot not started. Use 'Start Trading' button to begin.")
+        print("[WARN] Bot instance accessed before core start. Initializing...")
+        try:
+            bot = FastCycleBot()
+            bot.start_core() # Start core immediately if bot is created here
+        except Exception as e:
+            print(f"[ERROR] Failed to initialize bot instance: {e}")
+            raise
     return bot
 
 # ---- API Routes ----
@@ -1488,61 +1494,20 @@ def get_bot_instance():
 @app.route("/")
 def dashboard():
     try:
-        # Check if bot is initialized
-        if bot is None:
-            # Show dashboard in "not started" state
-            recent = read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)
-            state = {
-                "running": False,
-                "watchlist_count": 0,
-                "watchlist_total": len(WATCHLIST),
-                "start_net_usdt": None,
-                "current_net_usdt": None,
-                "profit_usd": None,
-                "profit_pct": None,
-                "trade_profit_usd": 0.0,
-                "total_buys": 0,
-                "total_sells": 0,
-                "workers": [],
-                "debug_enabled": True,
-                "tunable_params": {
-                    'take_profit_pct': TUNABLE_PARAMS['take_profit_pct'],
-                    'trail_arm_pct': TUNABLE_PARAMS['trail_arm_pct'], 
-                    'trail_giveback_pct': TUNABLE_PARAMS['trail_giveback_pct'],
-                    'stop_loss_pct': TUNABLE_PARAMS['stop_loss_pct'],
-                    'min_day_volatility_pct': TUNABLE_PARAMS['min_day_volatility_pct'],
-                    'volume_multiplier': TUNABLE_PARAMS['vol_mult'],
-                    'ema_strictness': TUNABLE_PARAMS['ema_relax'],
-                    'buying_pattern': TUNABLE_PARAMS.get('buying_pattern', 1),
-                    'cooldown_minutes': COOLDOWN_MINUTES
-                }
-            }
-            return render_template("dashboard.html",
-                                 state=state,
-                                 recent_trades=recent,
-                                 watchlist_list=WATCHLIST,
-                                 tp_trigger_pct=(TAKE_PROFIT_MIN_PCT*100),
-                                 trail_arm=(TRAIL_ARM_PCT*100),
-                                 trail_pct=(TRAIL_GIVEBACK_PCT*100),
-                                 sl_pct=(STOP_LOSS_PCT*100),
-                                 time_limit=MAX_TRADE_MINUTES,
-                                 min_day_vol=MIN_DAY_VOLATILITY_PCT,
-                                 recent_limit=RECENT_TRADES_LIMIT)
-        else:
-            # Bot is running, get live state
-            recent = read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)
-            state = bot.dashboard_state()
-            return render_template("dashboard.html",
-                                 state=state,
-                                 recent_trades=recent,
-                                 watchlist_list=bot.watchlist,
-                                 tp_trigger_pct=(TAKE_PROFIT_MIN_PCT*100),
-                                 trail_arm=(TRAIL_ARM_PCT*100),
-                                 trail_pct=(TRAIL_GIVEBACK_PCT*100),
-                                 sl_pct=(STOP_LOSS_PCT*100),
-                                 time_limit=MAX_TRADE_MINUTES,
-                                 min_day_vol=MIN_DAY_VOLATILITY_PCT,
-                                 recent_limit=RECENT_TRADES_LIMIT)
+        bot_instance = get_bot_instance()
+        recent = read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)
+        state = bot_instance.dashboard_state()
+        return render_template("dashboard.html",
+                             state=state,
+                             recent_trades=recent,
+                             watchlist_list=bot_instance.watchlist,
+                             tp_trigger_pct=(TAKE_PROFIT_MIN_PCT*100),
+                             trail_arm=(TRAIL_ARM_PCT*100),
+                             trail_pct=(TRAIL_GIVEBACK_PCT*100),
+                             sl_pct=(STOP_LOSS_PCT*100),
+                             time_limit=MAX_TRADE_MINUTES,
+                             min_day_vol=MIN_DAY_VOLATILITY_PCT,
+                             recent_limit=RECENT_TRADES_LIMIT)
     except Exception as e:
         print(f"[Dashboard] Error rendering: {e}")
         return "Error loading dashboard.", 500
@@ -1550,14 +1515,9 @@ def dashboard():
 @app.get("/api/status")
 def api_status():
     try:
-        if bot is None:
-            return jsonify({
-                "running": False,
-                "message": "Trading not started. Click 'Start Trading' to begin."
-            })
-        else:
-            status = bot.dashboard_state()
-            return jsonify(status)
+        bot_instance = get_bot_instance()
+        status = bot_instance.dashboard_state()
+        return jsonify(status)
     except Exception as e:
         print(f"[API] Status ERROR: {e}")
         return jsonify({"error": str(e)}), 500
@@ -1630,8 +1590,7 @@ def api_debug_export():
 @app.route("/analysis")
 def analysis_page():
     try:
-        # Don't require bot to be started to view analytics page
-        # The page itself will handle the "not started" state via API calls
+        get_bot_instance() # Ensure bot is initialized
         return render_template("analysis.html")
     except Exception as e:
         print(f"[Analysis Page] Error: {e}")
@@ -1640,13 +1599,8 @@ def analysis_page():
 @app.get("/api/analysis/performance")
 def api_analysis_performance():
     try:
-        # Check if bot is started, if not use standalone analyzer
-        if bot is None:
-            # Create standalone analyzer to read from CSV file
-            analyzer = TradeAnalyzer(LOG_FILE)
-            analysis = analyzer.get_comprehensive_analysis()
-        else:
-            analysis = bot.trade_analyzer.get_comprehensive_analysis()
+        bot_instance = get_bot_instance()
+        analysis = bot_instance.trade_analyzer.get_comprehensive_analysis()
         
         # Ensure all required fields are present and properly formatted
         if 'error' not in analysis:
@@ -1673,7 +1627,7 @@ def api_analysis_performance():
         import traceback
         traceback.print_exc()
         return jsonify({
-            "error": f"Analysis failed: {str(e)}",
+            "error": str(e),
             "total_trades": 0,
             "win_rate": 0.0,
             "avg_pnl": 0.0,
@@ -1774,49 +1728,59 @@ def update_params():
         print(f"[API] Update params ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.post("/api/start-trading")
-def api_start_trading():
+@app.post("/api/reconnect-api")
+def api_reconnect():
     try:
         global bot
-        
-        print("[API] Starting trading bot...")
-        
-        # Initialize bot if not exists
         if bot is None:
-            print("[API] Initializing bot core...")
-            bot = FastCycleBot()
+            return jsonify({"error": "Bot not initialized"}), 400
         
-        # Start the bot core (this will connect to Binance)
-        if not bot._running:
-            bot.start_core()
-            
-        if bot._running:
-            # Get balance to confirm connection
-            new_balance = get_net_usdt_value(bot._client)
-            server_ip = get_server_ip()
-            
-            print(f"[API] Trading bot started successfully")
-            print(f"[API] Balance: {new_balance:.2f} USDT")
-            print(f"[API] Server IP: {server_ip}")
-            
+        print("[API] Reconnecting to Binance API...")
+        
+        # Test current connection first
+        try:
+            test_response = bot._client.get_account()
             return jsonify({
-                "status": "started",
-                "message": "Trading bot started successfully",
-                "balance": f"{new_balance:.2f} USDT",
-                "server_ip": server_ip
+                "status": "already_connected", 
+                "message": "API connection is already working",
+                "balance": f"{get_net_usdt_value(bot._client):.2f} USDT"
             })
-        else:
+        except Exception as conn_error:
+            print(f"[API] Current connection failed: {conn_error}")
+        
+        # Reinitialize the client
+        old_client = bot._client
+        bot._client = build_client()
+        
+        # Test new connection
+        try:
+            account_info = bot._client.get_account()
+            new_balance = get_net_usdt_value(bot._client)
+            bot.current_net_usdt = new_balance
+            
+            print(f"[API] Successfully reconnected to Binance API")
+            print(f"[API] New balance: {new_balance:.2f} USDT")
+            
             return jsonify({
-                "error": "Failed to start trading bot",
-                "suggestion": "Check your API keys and ensure the server IP is whitelisted in Binance"
+                "status": "reconnected",
+                "message": "Successfully reconnected to Binance API",
+                "balance": f"{new_balance:.2f} USDT",
+                "server_ip": get_server_ip()
+            })
+            
+        except Exception as new_conn_error:
+            # Rollback to old client if new one fails
+            bot._client = old_client
+            print(f"[API] Reconnection failed, rolled back: {new_conn_error}")
+            
+            return jsonify({
+                "error": f"Reconnection failed: {new_conn_error}",
+                "suggestion": "Make sure you've whitelisted the server IP in Binance"
             }), 400
             
     except Exception as e:
-        print(f"[API] Start trading failed: {e}")
-        return jsonify({
-            "error": f"Failed to start trading: {e}",
-            "suggestion": "Make sure you've whitelisted the server IP in Binance and your API keys are correct"
-        }), 400
+        print(f"[API] Reconnect ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.get("/api/server-info")
 def api_server_info():
@@ -1855,48 +1819,36 @@ def api_server_info():
         }), 500
 
 def get_server_ip():
-    """Get the server's public IP address for Binance whitelisting"""
+    """Get the server's internal IP address"""
     try:
-        # Method 1: Try multiple external IP services
-        ip_services = [
-            "https://api.ipify.org",
-            "https://ipinfo.io/ip", 
-            "https://icanhazip.com",
-            "https://ident.me"
-        ]
+        import socket
+        import subprocess
         
-        for service in ip_services:
-            try:
-                response = requests.get(service, timeout=5)
-                if response.status_code == 200:
-                    public_ip = response.text.strip()
-                    if public_ip and '.' in public_ip:
-                        return f"{public_ip} (public IP for Binance)"
-            except Exception:
-                continue
+        # Try to get hostname first
+        hostname = socket.gethostname()
         
-        # Method 2: Try httpbin.org (returns JSON)
-        try:
-            response = requests.get("https://httpbin.org/ip", timeout=5)
-            if response.status_code == 200:
-                data = response.json()
-                public_ip = data.get('origin', '').split(',')[0].strip()
-                if public_ip:
-                    return f"{public_ip} (public IP for Binance)"
-        except Exception:
-            pass
+        # Get all network interfaces
+        result = subprocess.run(['hostname', '-I'], capture_output=True, text=True)
+        if result.returncode == 0:
+            # Return the first IP address (usually the main interface)
+            ips = result.stdout.strip().split()
+            if ips:
+                return f"{ips[0]} (hostname: {hostname})"
         
-        # Fallback: Show internal IP with warning
-        try:
-            import socket
-            hostname = socket.gethostname()
-            local_ip = socket.gethostbyname(hostname)
-            return f"⚠️ {local_ip} (INTERNAL IP - NOT for Binance! See deployment guide)"
-        except Exception:
-            return "❌ Unable to determine public IP - check deployment guide"
+        # Fallback: try socket method
+        local_ip = socket.gethostbyname(hostname)
+        return f"{local_ip} (hostname: {hostname})"
         
     except Exception as e:
-        return f"❌ Error getting public IP: {e}"
+        # Last resort: try the original method
+        try:
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+            return f"{local_ip} (detected)"
+        except Exception:
+            return "Unable to determine server IP"
 
 if __name__ == "__main__":
     print("=== STARTING TRADEPRO BOT ===")
@@ -1904,15 +1856,15 @@ if __name__ == "__main__":
     # Output IP address
     server_ip = get_server_ip()
     print(f"🌐 Server IP Address: {server_ip}")
-    print("📋 WHITELIST THIS IP IN YOUR BINANCE ACCOUNT BEFORE STARTING TRADING")
     
     print(f"Dashboard will be available at: http://0.0.0.0:5000")
-    print("Ready to start - use the 'Start Trading' button after whitelisting the IP")
+    print("Initializing bot core...")
 
     try:
-        # Don't initialize bot on startup - wait for user to start it
-        bot = None
-        print("✅ Dashboard ready - waiting for trading start")
+        # Initialize bot on startup
+        bot = FastCycleBot()
+        bot.start_core()
+        print("✅ Bot core ready")
 
         # Disable Flask's request logging for performance
         import logging
@@ -1923,7 +1875,7 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
     except Exception as e:
-        print(f"CRITICAL ERROR: Failed to start Flask server: {e}")
+        print(f"CRITICAL ERROR: Failed to start Flask server or initialize bot: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
