@@ -1476,17 +1476,11 @@ class FastCycleBot:
 app = Flask(__name__, template_folder="templates")
 bot = None # Initialize bot to None
 
-# Helper function to get or create bot instance
+# Helper function to get bot instance (no auto-creation)
 def get_bot_instance():
     global bot
     if bot is None:
-        print("[WARN] Bot instance accessed before core start. Initializing...")
-        try:
-            bot = FastCycleBot()
-            bot.start_core() # Start core immediately if bot is created here
-        except Exception as e:
-            print(f"[ERROR] Failed to initialize bot instance: {e}")
-            raise
+        raise RuntimeError("Bot not started. Use 'Start Trading' button to begin.")
     return bot
 
 # ---- API Routes ----
@@ -1494,20 +1488,61 @@ def get_bot_instance():
 @app.route("/")
 def dashboard():
     try:
-        bot_instance = get_bot_instance()
-        recent = read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)
-        state = bot_instance.dashboard_state()
-        return render_template("dashboard.html",
-                             state=state,
-                             recent_trades=recent,
-                             watchlist_list=bot_instance.watchlist,
-                             tp_trigger_pct=(TAKE_PROFIT_MIN_PCT*100),
-                             trail_arm=(TRAIL_ARM_PCT*100),
-                             trail_pct=(TRAIL_GIVEBACK_PCT*100),
-                             sl_pct=(STOP_LOSS_PCT*100),
-                             time_limit=MAX_TRADE_MINUTES,
-                             min_day_vol=MIN_DAY_VOLATILITY_PCT,
-                             recent_limit=RECENT_TRADES_LIMIT)
+        # Check if bot is initialized
+        if bot is None:
+            # Show dashboard in "not started" state
+            recent = read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)
+            state = {
+                "running": False,
+                "watchlist_count": 0,
+                "watchlist_total": len(WATCHLIST),
+                "start_net_usdt": None,
+                "current_net_usdt": None,
+                "profit_usd": None,
+                "profit_pct": None,
+                "trade_profit_usd": 0.0,
+                "total_buys": 0,
+                "total_sells": 0,
+                "workers": [],
+                "debug_enabled": True,
+                "tunable_params": {
+                    'take_profit_pct': TUNABLE_PARAMS['take_profit_pct'],
+                    'trail_arm_pct': TUNABLE_PARAMS['trail_arm_pct'], 
+                    'trail_giveback_pct': TUNABLE_PARAMS['trail_giveback_pct'],
+                    'stop_loss_pct': TUNABLE_PARAMS['stop_loss_pct'],
+                    'min_day_volatility_pct': TUNABLE_PARAMS['min_day_volatility_pct'],
+                    'volume_multiplier': TUNABLE_PARAMS['vol_mult'],
+                    'ema_strictness': TUNABLE_PARAMS['ema_relax'],
+                    'buying_pattern': TUNABLE_PARAMS.get('buying_pattern', 1),
+                    'cooldown_minutes': COOLDOWN_MINUTES
+                }
+            }
+            return render_template("dashboard.html",
+                                 state=state,
+                                 recent_trades=recent,
+                                 watchlist_list=WATCHLIST,
+                                 tp_trigger_pct=(TAKE_PROFIT_MIN_PCT*100),
+                                 trail_arm=(TRAIL_ARM_PCT*100),
+                                 trail_pct=(TRAIL_GIVEBACK_PCT*100),
+                                 sl_pct=(STOP_LOSS_PCT*100),
+                                 time_limit=MAX_TRADE_MINUTES,
+                                 min_day_vol=MIN_DAY_VOLATILITY_PCT,
+                                 recent_limit=RECENT_TRADES_LIMIT)
+        else:
+            # Bot is running, get live state
+            recent = read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)
+            state = bot.dashboard_state()
+            return render_template("dashboard.html",
+                                 state=state,
+                                 recent_trades=recent,
+                                 watchlist_list=bot.watchlist,
+                                 tp_trigger_pct=(TAKE_PROFIT_MIN_PCT*100),
+                                 trail_arm=(TRAIL_ARM_PCT*100),
+                                 trail_pct=(TRAIL_GIVEBACK_PCT*100),
+                                 sl_pct=(STOP_LOSS_PCT*100),
+                                 time_limit=MAX_TRADE_MINUTES,
+                                 min_day_vol=MIN_DAY_VOLATILITY_PCT,
+                                 recent_limit=RECENT_TRADES_LIMIT)
     except Exception as e:
         print(f"[Dashboard] Error rendering: {e}")
         return "Error loading dashboard.", 500
@@ -1515,9 +1550,14 @@ def dashboard():
 @app.get("/api/status")
 def api_status():
     try:
-        bot_instance = get_bot_instance()
-        status = bot_instance.dashboard_state()
-        return jsonify(status)
+        if bot is None:
+            return jsonify({
+                "running": False,
+                "message": "Trading not started. Click 'Start Trading' to begin."
+            })
+        else:
+            status = bot.dashboard_state()
+            return jsonify(status)
     except Exception as e:
         print(f"[API] Status ERROR: {e}")
         return jsonify({"error": str(e)}), 500
