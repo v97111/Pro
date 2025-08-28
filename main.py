@@ -1728,52 +1728,48 @@ def update_params():
         print(f"[API] Update params ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.post("/api/reconnect-api")
-def api_reconnect():
+@app.post("/api/start-trading")
+def api_start_trading():
     try:
         global bot
+        
+        print("[API] Starting trading bot...")
+        
+        # Initialize bot if not exists
         if bot is None:
-            return jsonify({"error": "Bot not initialized"}), 400
+            print("[API] Initializing bot core...")
+            bot = FastCycleBot()
         
-        print("[API] Reconnecting to Binance API...")
-        
-        # Test current connection first
-        try:
-            test_response = bot._client.get_account()
+        # Start the bot core (this will connect to Binance)
+        if not bot._running:
+            bot.start_core()
+            
+        if bot._running:
+            # Get balance to confirm connection
             new_balance = get_net_usdt_value(bot._client)
+            server_ip = get_server_ip()
+            
+            print(f"[API] Trading bot started successfully")
+            print(f"[API] Balance: {new_balance:.2f} USDT")
+            print(f"[API] Server IP: {server_ip}")
+            
             return jsonify({
-                "status": "already_connected", 
-                "message": "API connection is already working",
+                "status": "started",
+                "message": "Trading bot started successfully",
                 "balance": f"{new_balance:.2f} USDT",
-                "server_ip": get_server_ip()
+                "server_ip": server_ip
             })
-        except Exception as conn_error:
-            print(f"[API] Current connection failed: {conn_error}")
-        
-        # Create new client connection
-        print("[API] Creating new Binance client...")
-        bot._client = build_client()
-        
-        # Test new connection
-        account_info = bot._client.get_account()
-        new_balance = get_net_usdt_value(bot._client)
-        bot.current_net_usdt = new_balance
-        
-        print(f"[API] Successfully reconnected to Binance API")
-        print(f"[API] New balance: {new_balance:.2f} USDT")
-        
-        return jsonify({
-            "status": "reconnected",
-            "message": "Successfully reconnected to Binance API",
-            "balance": f"{new_balance:.2f} USDT",
-            "server_ip": get_server_ip()
-        })
+        else:
+            return jsonify({
+                "error": "Failed to start trading bot",
+                "suggestion": "Check your API keys and ensure the server IP is whitelisted in Binance"
+            }), 400
             
     except Exception as e:
-        print(f"[API] Reconnection failed: {e}")
+        print(f"[API] Start trading failed: {e}")
         return jsonify({
-            "error": f"Reconnection failed: {e}",
-            "suggestion": "Make sure you've whitelisted the server IP in Binance"
+            "error": f"Failed to start trading: {e}",
+            "suggestion": "Make sure you've whitelisted the server IP in Binance and your API keys are correct"
         }), 400
 
 @app.get("/api/server-info")
@@ -1850,15 +1846,15 @@ if __name__ == "__main__":
     # Output IP address
     server_ip = get_server_ip()
     print(f"🌐 Server IP Address: {server_ip}")
+    print("📋 WHITELIST THIS IP IN YOUR BINANCE ACCOUNT BEFORE STARTING TRADING")
     
     print(f"Dashboard will be available at: http://0.0.0.0:5000")
-    print("Initializing bot core...")
+    print("Ready to start - use the 'Start Trading' button after whitelisting the IP")
 
     try:
-        # Initialize bot on startup
-        bot = FastCycleBot()
-        bot.start_core()
-        print("✅ Bot core ready")
+        # Don't initialize bot on startup - wait for user to start it
+        bot = None
+        print("✅ Dashboard ready - waiting for trading start")
 
         # Disable Flask's request logging for performance
         import logging
@@ -1869,7 +1865,7 @@ if __name__ == "__main__":
         app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
     except Exception as e:
-        print(f"CRITICAL ERROR: Failed to start Flask server or initialize bot: {e}")
+        print(f"CRITICAL ERROR: Failed to start Flask server: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
