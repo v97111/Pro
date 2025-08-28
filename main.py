@@ -1819,36 +1819,43 @@ def api_server_info():
         }), 500
 
 def get_server_ip():
-    """Get the server's internal IP address"""
+    """Get the server's external IP address for Binance whitelisting"""
     try:
-        import socket
-        import subprocess
+        # First try to get external IP using HTTP services
+        services = [
+            "https://api.ipify.org",
+            "https://ipecho.net/plain",
+            "https://icanhazip.com",
+            "https://ident.me"
+        ]
         
-        # Try to get hostname first
+        for service in services:
+            try:
+                response = requests.get(service, timeout=10)
+                if response.status_code == 200:
+                    external_ip = response.text.strip()
+                    # Validate it's a proper IP address
+                    import socket
+                    socket.inet_aton(external_ip)
+                    return f"{external_ip} (external)"
+            except Exception:
+                continue
+        
+        # Fallback: Get internal IP with warning
+        import socket
         hostname = socket.gethostname()
         
-        # Get all network interfaces
-        result = subprocess.run(['hostname', '-I'], capture_output=True, text=True)
-        if result.returncode == 0:
-            # Return the first IP address (usually the main interface)
-            ips = result.stdout.strip().split()
-            if ips:
-                return f"{ips[0]} (hostname: {hostname})"
-        
-        # Fallback: try socket method
-        local_ip = socket.gethostbyname(hostname)
-        return f"{local_ip} (hostname: {hostname})"
-        
-    except Exception as e:
-        # Last resort: try the original method
         try:
-            import socket
+            # Try socket method for internal IP
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-            return f"{local_ip} (detected)"
+                internal_ip = s.getsockname()[0]
+            return f"{internal_ip} (⚠️ INTERNAL - Use external IP for Binance)"
         except Exception:
-            return "Unable to determine server IP"
+            return "Unable to determine IP address"
+        
+    except Exception as e:
+        return f"Error getting IP: {str(e)}"
 
 if __name__ == "__main__":
     print("=== STARTING TRADEPRO BOT ===")
