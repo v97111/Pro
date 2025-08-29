@@ -927,20 +927,31 @@ def evaluate_buy_checks(client, symbol, cache, policy):
 def market_buy_by_quote(client, symbol, quote_usdt):
     max_retries = 3
     
-    # Check account balance first
-    try:
-        account = client.get_account()
-        usdt_balance = 0.0
-        for balance in account['balances']:
-            if balance['asset'] == 'USDT':
-                usdt_balance = float(balance['free'])
-                break
-        
-        if usdt_balance < float(quote_usdt):
-            raise RuntimeError(f"Insufficient USDT balance. Available: {usdt_balance:.2f}, Required: {quote_usdt}")
+    # Enhanced balance validation with retry
+    for balance_check in range(3):
+        try:
+            account = client.get_account()
+            usdt_balance = 0.0
+            for balance in account['balances']:
+                if balance['asset'] == 'USDT':
+                    usdt_balance = float(balance['free'])
+                    break
             
-    except Exception as balance_error:
-        print(f"[BUY] Warning - Could not verify balance: {balance_error}")
+            # Add buffer for fees and other pending orders
+            required_balance = float(quote_usdt) * 1.05  # 5% buffer
+            if usdt_balance < required_balance:
+                raise RuntimeError(f"Insufficient USDT balance. Available: {usdt_balance:.2f}, Required: {required_balance:.2f} (including 5% buffer)")
+            
+            print(f"[BUY] Balance check OK: {usdt_balance:.2f} USDT available")
+            break
+            
+        except Exception as balance_error:
+            if "Insufficient" in str(balance_error):
+                raise balance_error
+            if balance_check == 2:
+                print(f"[BUY] Warning - Could not verify balance after 3 attempts: {balance_error}")
+                break
+            time.sleep(1)
     
     for attempt in range(max_retries):
         try:
@@ -949,35 +960,69 @@ def market_buy_by_quote(client, symbol, quote_usdt):
             min_req = max(10.0, min_notional * 1.1)  # Add 10% buffer
             spend = max(float(quote_usdt), min_req)
 
-            print(f"[BUY] Attempting to buy {symbol} with {spend:.2f} USDT at ~{price:.6f} (lot: {lot})")
+            print(f"[BUY] Attempting to buy {symbol} with {spend:.2f} USDT at ~{price:.6f}")
+            print(f"[FILTERS] {symbol}: tick={tick}, lot={lot}, min_notional={min_notional}")
 
             try:
                 # Try quoteOrderQty first (preferred for market orders)
                 order = client.create_order(symbol=symbol, side="BUY", type="MARKET", quoteOrderQty=round(spend, 2))
+                print(f"[BUY] Success using quoteOrderQty method")
             except Exception as quote_error:
                 print(f"[BUY] QuoteOrderQty failed for {symbol}, using quantity method: {quote_error}")
                 
-                # Calculate quantity with proper precision
+                # Enhanced quantity calculation with proper lot size handling
                 raw_qty = spend / price
                 
-                # Apply lot size rounding properly
+                # Proper lot size calculation
                 if lot > 0:
-                    # Calculate decimal places needed for lot size
-                    lot_str = f"{lot:.10f}".rstrip('0').rstrip('.')
-                    decimal_places = len(lot_str.split('.')[-1]) if '.' in lot_str else 0
-                    qty = round(raw_qty // lot * lot, decimal_places)
+                    # Use mathematical approach for lot size
+                    import math
+                    # Calculate how many lot sizes fit in raw_qty
+                    lot_count = math.floor(raw_qty / lot)
+                    qty = lot_count * lot
+                    
+                    # Format to appropriate decimal places
+                    if lot >= 1:
+                        qty = round(qty, 0)
+                    elif lot >= 0.1:
+                        qty = round(qty, 1)
+                    elif lot >= 0.01:
+                        qty = round(qty, 2)
+                    elif lot >= 0.001:
+                        qty = round(qty, 3)
+                    elif lot >= 0.0001:
+                        qty = round(qty, 4)
+                    else:
+                        qty = round(qty, 8)
                 else:
                     qty = round(raw_qty, 8)  # Default 8 decimals
                 
                 if qty <= 0:
-                    raise RuntimeError(f"Quantity rounded to 0. Raw: {raw_qty}, Lot: {lot}, Final: {qty}")
+                    raise RuntimeError(f"Quantity rounds to 0. Raw: {raw_qty:.8f}, Lot: {lot}, Calculated: {qty}")
+                
+                # Verify minimum notional
+                trade_value = price * qty
+                if trade_value < min_notional:
+                    raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_notional:.2f}")
                 
                 print(f"[BUY] Using quantity: {qty} (from {raw_qty:.8f}, lot: {lot})")
                 order = client.create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
+                print(f"[BUY] Success using quantity method")
             break
+            
         except Exception as e:
-            if "insufficient balance" in str(e).lower():
+            error_msg = str(e).lower()
+            if "insufficient balance" in error_msg:
                 raise RuntimeError(f"Insufficient balance confirmed by exchange: {e}")
+            elif "lot_size" in error_msg:
+                print(f"[WARN] LOT_SIZE error on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    # Try with slightly different quantity calculation
+                    time.sleep(1)
+                    continue
+            elif "precision" in error_msg:
+                print(f"[WARN] Precision error on attempt {attempt + 1}: {e}")
+                
             if attempt == max_retries - 1:
                 raise RuntimeError(f"Failed to execute buy order for {symbol} after {max_retries} attempts: {e}")
             print(f"[WARN] Buy attempt {attempt + 1} failed for {symbol}: {e}")
@@ -1020,28 +1065,52 @@ def market_sell_qty(client, symbol, qty):
             # Get proper lot size with better filtering
             tick, lot, min_notional = get_symbol_filters(client, symbol)
             
-            # Apply lot size rounding with proper precision
+            # Enhanced lot size calculation
             if lot > 0:
-                # Calculate decimal places for proper rounding
-                lot_str = f"{lot:.10f}".rstrip('0').rstrip('.')
-                decimal_places = len(lot_str.split('.')[-1]) if '.' in lot_str else 0
-                actual_qty = round(actual_qty // lot * lot, decimal_places)
+                import math
+                # Use mathematical approach for lot size
+                lot_count = math.floor(actual_qty / lot)
+                actual_qty = lot_count * lot
+                
+                # Format to appropriate decimal places
+                if lot >= 1:
+                    actual_qty = round(actual_qty, 0)
+                elif lot >= 0.1:
+                    actual_qty = round(actual_qty, 1)
+                elif lot >= 0.01:
+                    actual_qty = round(actual_qty, 2)
+                elif lot >= 0.001:
+                    actual_qty = round(actual_qty, 3)
+                elif lot >= 0.0001:
+                    actual_qty = round(actual_qty, 4)
+                else:
+                    actual_qty = round(actual_qty, 8)
             
             if actual_qty <= 0:
-                raise RuntimeError(f"Quantity rounds to 0 after lot size filter. Available: {available_qty}, Lot: {lot}")
+                raise RuntimeError(f"Quantity rounds to 0 after lot size filter. Available: {available_qty:.8f}, Lot: {lot}")
 
             # Check min notional requirement
             price = get_price_cached(client, symbol)
-            min_req = max(10.0, min_notional * 1.1)  # Add 10% buffer
+            min_req = max(5.0, min_notional * 1.05)  # Reduced buffer for sells
             trade_value = price * actual_qty
             
             if trade_value < min_req:
                 raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_req:.2f}")
 
-            print(f"[SELL] Selling {actual_qty} {asset} (value: {trade_value:.2f} USDT, lot: {lot})")
+            print(f"[SELL] Attempting to sell {actual_qty} {asset} (estimated value: {trade_value:.2f} USDT)")
+            print(f"[FILTERS] {symbol}: tick={tick}, lot={lot}, min_notional={min_notional}")
+            
             order = client.create_order(symbol=symbol, side="SELL", type="MARKET", quantity=actual_qty)
+            print(f"[SELL] Order executed successfully")
             break
+            
         except Exception as e:
+            error_msg = str(e).lower()
+            if "lot_size" in error_msg:
+                print(f"[WARN] LOT_SIZE error on sell attempt {attempt + 1}: {e}")
+            elif "precision" in error_msg:
+                print(f"[WARN] Precision error on sell attempt {attempt + 1}: {e}")
+                
             if attempt == max_retries - 1:
                 raise RuntimeError(f"Failed to execute sell order for {symbol} after {max_retries} attempts: {e}")
             print(f"[WARN] Sell attempt {attempt + 1} failed for {symbol}: {e}")
@@ -1053,9 +1122,12 @@ def market_sell_qty(client, symbol, qty):
         sold = sum(float(f["qty"]) for f in fills)
         avg_price = earned / sold if sold > 0 else price
         qty = sold
+        print(f"[SELL] Success: Sold {qty:.8f} {asset} for {earned:.2f} USDT (avg price: {avg_price:.6f})")
     else:
         avg_price = price
         qty = actual_qty
+        print(f"[SELL] Fallback calculation: {qty:.8f} {asset} at {avg_price:.6f}")
+    
     return avg_price, qty
 
 # ------------------ Multi-Worker ----------------
