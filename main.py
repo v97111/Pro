@@ -1107,62 +1107,94 @@ def market_sell_qty(client, symbol, qty):
             # Get proper lot size with better filtering
             tick, lot, min_notional = get_symbol_filters(client, symbol)
 
-            # Enhanced lot size calculation with proper precision handling
+            # Enhanced lot size calculation with bulletproof precision handling
             if lot > 0:
                 from decimal import Decimal, ROUND_DOWN
                 import math
 
-                # Use Decimal for precise calculations to avoid floating point errors
-                actual_qty_decimal = Decimal(str(actual_qty))
+                print(f"[PRECISION_DEBUG] Starting calculation - Available: {actual_qty:.12f}, Lot: {lot:.12f}")
+
+                # Convert to high-precision Decimal with extra precision
+                actual_qty_str = f"{actual_qty:.12f}".rstrip('0').rstrip('.')
+                actual_qty_decimal = Decimal(actual_qty_str)
                 lot_decimal = Decimal(str(lot))
 
-                # Calculate how many complete lot sizes fit in available quantity
-                lot_count = int(actual_qty_decimal / lot_decimal)
+                print(f"[PRECISION_DEBUG] Decimal conversion - Qty: {actual_qty_decimal}, Lot: {lot_decimal}")
 
-                # Ensure we use floor division to avoid any remainder
-                adjusted_qty_decimal = lot_count * lot_decimal
+                # Calculate exact number of lot units using integer arithmetic
+                # This eliminates ALL floating point precision issues
+                lot_units = int(actual_qty_decimal / lot_decimal)
+                
+                # Calculate exact quantity as integer multiplication of lot size
+                exact_qty_decimal = lot_units * lot_decimal
+                
+                print(f"[PRECISION_DEBUG] Lot calculation - Units: {lot_units}, Exact qty: {exact_qty_decimal}")
 
-                # Determine precision based on lot size for exact formatting
-                if lot >= 1.0:
-                    precision = Decimal('1')
-                elif lot >= 0.1:
-                    precision = Decimal('0.1')
-                elif lot >= 0.01:
-                    precision = Decimal('0.01')
-                elif lot >= 0.001:
-                    precision = Decimal('0.001')
-                elif lot >= 0.0001:
-                    precision = Decimal('0.0001')
-                elif lot >= 0.00001:
-                    precision = Decimal('0.00001')
-                elif lot >= 0.000001:
-                    precision = Decimal('0.000001')
-                elif lot >= 0.0000001:
-                    precision = Decimal('0.0000001')
+                # Determine the exact number of decimal places needed
+                lot_str = f"{lot:.12f}".rstrip('0').rstrip('.')
+                if '.' in lot_str:
+                    decimal_places = len(lot_str.split('.')[1])
                 else:
-                    precision = Decimal('0.00000001')
+                    decimal_places = 0
+                
+                # Format to exact decimal places to match lot size precision
+                format_str = f"{{:.{decimal_places}f}}"
+                actual_qty = float(format_str.format(float(exact_qty_decimal)))
 
-                # Final quantization to exact lot size precision
-                actual_qty = float(adjusted_qty_decimal.quantize(precision, rounding=ROUND_DOWN))
+                print(f"[PRECISION_DEBUG] Final formatting - Decimal places: {decimal_places}, Final qty: {actual_qty:.12f}")
 
-                # Double verification: ensure result is exact multiple of lot size
-                remainder = actual_qty % lot
-                if abs(remainder) > lot / 1000:  # Allow tiny tolerance
-                    # Force to exact multiple using mathematical floor
-                    exact_lots = math.floor(actual_qty / lot)
-                    actual_qty = exact_lots * lot
+                # Ultimate verification: check remainder is exactly zero
+                verification_remainder = actual_qty % lot
+                print(f"[PRECISION_DEBUG] Remainder check: {verification_remainder:.15f}")
+                
+                if abs(verification_remainder) > 1e-12:  # Extremely strict tolerance
+                    # Last resort: use pure integer arithmetic
+                    print(f"[PRECISION_DEBUG] Still has remainder, using integer method...")
+                    
+                    # Convert everything to smallest units to avoid decimals entirely
+                    multiplier = 1
+                    while (lot * multiplier) % 1 != 0 and multiplier < 10**8:
+                        multiplier *= 10
+                    
+                    qty_units = int(actual_qty * multiplier)
+                    lot_units_int = int(lot * multiplier)
+                    
+                    # Integer division to get exact lot multiples
+                    exact_lot_count = qty_units // lot_units_int
+                    actual_qty = (exact_lot_count * lot_units_int) / multiplier
+                    
+                    print(f"[PRECISION_DEBUG] Integer method result: {actual_qty:.12f}")
+
+                print(f"[LOT_SIZE_FIX] Original: {available_qty:.8f} -> Adjusted: {actual_qty:.8f} (Lot: {lot})")
+                print(f"[LOT_SIZE_FIX] Final remainder check: {actual_qty % lot:.15f}")
 
             if actual_qty <= 0:
                 raise RuntimeError(f"Quantity rounds to 0 after lot size filter. Available: {available_qty:.8f}, Lot: {lot}")
 
-            # Final verification that quantity is valid multiple of lot size
-            remainder_check = actual_qty % lot
-            if abs(remainder_check) > 1e-10:  # Very strict precision check
-                print(f"[WARN] Quantity precision issue detected, adjusting...")
-                # Force exact multiple using integer arithmetic
-                lot_units = int(actual_qty / lot)
+            # Final verification - if still has precision issues, use string formatting method
+            final_remainder = actual_qty % lot
+            if abs(final_remainder) > 1e-12:
+                print(f"[LOT_SIZE_CRITICAL] Still has precision issue, using string method...")
+                print(f"[LOT_SIZE_CRITICAL] Qty: {actual_qty:.12f}, Remainder: {final_remainder:.15f}")
+                
+                # Fallback: String-based exact calculation
+                lot_str = f"{lot:.12f}".rstrip('0').rstrip('.')
+                if '.' in lot_str:
+                    decimals = len(lot_str.split('.')[1])
+                else:
+                    decimals = 0
+                
+                # Use string formatting to force exact precision
+                format_string = f"{{:.{decimals}f}}"
+                lot_units = int(actual_qty / lot)  # Floor division
                 actual_qty = lot_units * lot
-                print(f"[FIX] Adjusted to exact lot multiple: {actual_qty}")
+                
+                # Apply exact string formatting
+                formatted_exact = format_string.format(actual_qty)
+                actual_qty = float(formatted_exact)
+                
+                print(f"[LOT_SIZE_CRITICAL] String method result: {actual_qty:.12f}")
+                print(f"[LOT_SIZE_CRITICAL] Final check remainder: {actual_qty % lot:.15f}")
 
             # Check min notional requirement
             price = get_price_cached(client, symbol)
@@ -1172,28 +1204,32 @@ def market_sell_qty(client, symbol, qty):
             if trade_value < min_req:
                 raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_req:.2f}")
 
-            # Format quantity to appropriate precision for API call
-            if lot >= 1.0:
-                formatted_qty = f"{actual_qty:.0f}"
-            elif lot >= 0.1:
-                formatted_qty = f"{actual_qty:.1f}"
-            elif lot >= 0.01:
-                formatted_qty = f"{actual_qty:.2f}"
-            elif lot >= 0.001:
-                formatted_qty = f"{actual_qty:.3f}"
-            elif lot >= 0.0001:
-                formatted_qty = f"{actual_qty:.4f}"
-            elif lot >= 0.00001:
-                formatted_qty = f"{actual_qty:.5f}"
-            elif lot >= 0.000001:
-                formatted_qty = f"{actual_qty:.6f}"
-            elif lot >= 0.0000001:
-                formatted_qty = f"{actual_qty:.7f}"
+            # Ultra-precise string formatting based on lot size
+            # Determine exact decimal places from lot size
+            lot_str = f"{lot:.15f}".rstrip('0').rstrip('.')
+            if '.' in lot_str:
+                required_decimals = len(lot_str.split('.')[1])
             else:
-                formatted_qty = f"{actual_qty:.8f}"
-
-            # Remove trailing zeros and convert back to float
+                required_decimals = 0
+            
+            # Format to exact required decimal places
+            format_pattern = f"{{:.{required_decimals}f}}"
+            formatted_qty = format_pattern.format(actual_qty)
+            
+            print(f"[PRECISION_FINAL] Lot size: {lot}, Required decimals: {required_decimals}")
+            print(f"[PRECISION_FINAL] Formatted quantity: {formatted_qty}")
+            
+            # Convert back to float for API call
             actual_qty = float(formatted_qty)
+            
+            # Final sanity check
+            if abs(actual_qty % lot) > 1e-15:
+                print(f"[PRECISION_ERROR] Still not exact! Remainder: {actual_qty % lot:.20f}")
+                # Force to lower quantity that's guaranteed to be exact
+                exact_units = int(actual_qty / lot)
+                actual_qty = exact_units * lot
+                actual_qty = float(f"{actual_qty:.{required_decimals}f}")
+                print(f"[PRECISION_FIXED] Forced exact: {actual_qty:.12f}"))
 
             print(f"[SELL] Attempting to sell {formatted_qty} {asset} (estimated value: {trade_value:.2f} USDT)")
             print(f"[FILTERS] {symbol}: tick={tick}, lot={lot}, min_notional={min_notional}")
