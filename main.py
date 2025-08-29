@@ -28,11 +28,53 @@ from binance.client import Client
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import io
+from contextlib import redirect_stdout, redirect_stderr
 
 # ---- Concurrency / caches ----
 LOG_LOCK = threading.Lock()
 PRICES_LOCK = threading.Lock()
 CANDLES_CACHE_LOCK = threading.Lock()
+
+# Console output capture
+class ConsoleCapture:
+    def __init__(self, max_lines=1000):
+        self.max_lines = max_lines
+        self.lines = deque(maxlen=max_lines)
+        self.lock = threading.Lock()
+        self.original_stdout = sys.stdout
+        self.original_stderr = sys.stderr
+        self.capturing = True
+        
+    def write(self, data):
+        # Write to original stdout first
+        self.original_stdout.write(data)
+        self.original_stdout.flush()
+        
+        # Only capture if enabled and data is meaningful
+        if self.capturing and data and data.strip() and not data.isspace():
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            with self.lock:
+                self.lines.append(f"[{timestamp}] {data.strip()}")
+    
+    def flush(self):
+        self.original_stdout.flush()
+    
+    def get_lines(self, limit=None):
+        with self.lock:
+            lines_list = list(self.lines)
+            if limit:
+                return lines_list[-limit:]
+            return lines_list
+    
+    def disable_capture(self):
+        self.capturing = False
+    
+    def enable_capture(self):
+        self.capturing = True
+
+# Global console capture
+console_capture = ConsoleCapture()
 
 _PRICE_CACHE = {"ts": 0.0, "prices": {}}  # global last-fetched prices
 PRICE_CACHE_TTL = 2  # seconds
@@ -149,7 +191,7 @@ KLIMIT   = 120
 TAKE_PROFIT_MIN_PCT   = 0.0100  # +1.00% hard TP
 TRAIL_ARM_PCT         = 0.0160  # arm trailing only if >= +1.6%
 TRAIL_GIVEBACK_PCT    = 0.0040  # 0.4% giveback; worst trailing ~+1.2%
-STOP_LOSS_PCT         = 0.01    # -1.0%
+STOP_LOSS_PCT         = 0.0100  # -1.0%
 MAX_TRADE_MINUTES     = 45
 
 # Entry filters - Now tunable
@@ -1068,18 +1110,12 @@ def market_sell_qty(client, symbol, qty):
             # Enhanced lot size calculation with proper precision handling
             if lot > 0:
                 import math
-                import decimal
 
-                # Use Decimal for precise calculations
-                decimal.getcontext().prec = 28
-                d_qty = decimal.Decimal(str(actual_qty))
-                d_lot = decimal.Decimal(str(lot))
+                # Calculate how many complete lot sizes fit in available quantity
+                lot_count = math.floor(actual_qty / lot)
+                actual_qty = lot_count * lot
 
-                # Calculate how many complete lot sizes fit
-                lot_count = int(d_qty / d_lot)
-                actual_qty = float(lot_count * d_lot)
-
-                # Determine appropriate decimal places based on lot size
+                # Determine decimal places based on lot size for proper formatting
                 if lot >= 1:
                     decimal_places = 0
                 elif lot >= 0.1:
@@ -1099,8 +1135,15 @@ def market_sell_qty(client, symbol, qty):
                 else:
                     decimal_places = 8
 
-                # Apply precise rounding
+                # Apply precise rounding to match lot size exactly
                 actual_qty = round(actual_qty, decimal_places)
+                
+                # Verify the quantity is still a valid multiple of lot size
+                remainder = actual_qty % lot
+                if remainder > lot * 0.01:  # Allow tiny precision errors
+                    # Round down to nearest valid lot size
+                    actual_qty = math.floor(actual_qty / lot) * lot
+                    actual_qty = round(actual_qty, decimal_places)
 
             if actual_qty <= 0:
                 raise RuntimeError(f"Quantity rounds to 0 after lot size filter. Available: {available_qty:.8f}, Lot: {lot}")
@@ -1115,6 +1158,7 @@ def market_sell_qty(client, symbol, qty):
 
             print(f"[SELL] Attempting to sell {actual_qty} {asset} (estimated value: {trade_value:.2f} USDT)")
             print(f"[FILTERS] {symbol}: tick={tick}, lot={lot}, min_notional={min_notional}")
+            print(f"[LOT_DEBUG] Original qty: {available_qty:.8f}, Lot size: {lot}, Calculated qty: {actual_qty:.8f}, Lot multiple check: {actual_qty % lot:.10f}")
 
             order = client.create_order(symbol=symbol, side="SELL", type="MARKET", quantity=actual_qty)
             print(f"[SELL] Order executed successfully")
@@ -1246,6 +1290,12 @@ class FastCycleBot:
         # Clear any existing debug events for fresh start
         self._debug_events.clear()
         print("✓ Worker management initialized")
+
+        # Enable console capture for dashboard
+        global console_capture
+        console_capture.enable_capture()
+        sys.stdout = console_capture
+        sys.stderr = console_capture
 
         # Portfolio tracking
         try:
@@ -1737,10 +1787,9 @@ bot = None # Initialize bot to None
 def get_bot_instance():
     global bot
     if bot is None:
-        print("[WARN] Bot instance accessed before core start. Initializing...")
+        print("[WARN] Bot instance accessed before initialization. Creating...")
         try:
             bot = FastCycleBot()
-            bot.start_core() # Start core immediately if bot is created here
         except Exception as e:
             print(f"[ERROR] Failed to initialize bot instance: {e}")
             raise
@@ -2005,6 +2054,55 @@ def update_params():
         print(f"[API] Update params ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.get("/api/console")
+def api_console():
+    try:
+        limit = request.args.get('limit', 100, type=int)
+        
+        # Get real console output from capture system
+        global console_capture
+        lines = console_capture.get_lines(limit)
+        
+        if not lines:
+            lines = ["Bot initialized - Console output will appear here"]
+            
+        return jsonify({"lines": lines, "total": len(lines)})
+    except Exception as e:
+        return jsonify({"error": str(e), "lines": []}), 500
+
+@app.get("/api/console/stream")
+def api_console_stream():
+    def generate():
+        last_count = 0
+        while True:
+            try:
+                global console_capture
+                current_lines = console_capture.get_lines()
+                current_count = len(current_lines)
+                
+                if current_count > last_count:
+                    new_lines = current_lines[last_count:]
+                    for line in new_lines:
+                        yield f"data: {json.dumps({'line': line})}\n\n"
+                    last_count = current_count
+                
+                time.sleep(1)  # Check every second for real-time updates
+            except Exception:
+                break
+    
+    return Response(generate(), mimetype='text/event-stream',
+                   headers={'Cache-Control': 'no-cache'})
+
+@app.post("/api/console/clear")
+def api_console_clear():
+    try:
+        global console_capture
+        with console_capture.lock:
+            console_capture.lines.clear()
+        return jsonify({"status": "cleared"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.post("/api/reconnect-api")
 def api_reconnect():
     try:
@@ -2144,10 +2242,12 @@ if __name__ == "__main__":
     print("Initializing bot core...")
 
     try:
-        # Initialize bot on startup
+        # Initialize bot without auto-starting (will be started via API or dashboard)
         bot = FastCycleBot()
-        bot.start_core()
-        print("✅ Bot core ready")
+        print("✅ Bot core initialized (ready for startup via dashboard)")
+
+        # Enable console capture for real-time dashboard display
+        print("🔧 Console capture enabled - all output will appear in dashboard")
 
         # Disable Flask's request logging for performance
         import logging
