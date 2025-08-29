@@ -1386,22 +1386,29 @@ class FastCycleBot:
         while not self._metrics_stop.is_set():
             try:
                 current_time = time.time()
-                if self._client and self._running and (current_time - last_balance_time) >= 60:  # Reduced frequency to 60s
+                # Always try to fetch balance if we have a client, regardless of running state
+                if self._client and (current_time - last_balance_time) >= 30:  # More frequent updates (30s)
                     try:
                         new_balance = get_net_usdt_value(self._client)
                         self.current_net_usdt = new_balance
                         last_balance_time = current_time
                         consecutive_failures = 0
+                        print(f"[METRICS] Balance updated: {new_balance:.2f} USDT")
                     except Exception as e:
                         consecutive_failures += 1
-                        print(f"[WARN] Balance fetch failed (attempt {consecutive_failures}): {e}")
-                        if consecutive_failures > 3:
-                            print("[WARN] Skipping balance updates due to repeated failures")
-                            time.sleep(300)  # Wait 5 minutes before retrying
+                        error_msg = str(e)
+                        if "Invalid API-key" in error_msg or "permissions" in error_msg:
+                            print(f"[WARN] API permission error - balance fetch failed: {error_msg}")
+                        else:
+                            print(f"[WARN] Balance fetch failed (attempt {consecutive_failures}): {e}")
+                        
+                        if consecutive_failures > 5:
+                            print("[WARN] Too many balance fetch failures, pausing updates")
+                            time.sleep(120)  # Wait 2 minutes before retrying
                             consecutive_failures = 0
             except Exception:
                 pass
-            time.sleep(10)  # Less frequent checks
+            time.sleep(5)  # More frequent checks for better responsiveness
 
     def _eligible_symbol(self, symbol: str) -> bool:
         """Check if symbol is eligible for trading (not on cooldown)"""
@@ -2025,6 +2032,24 @@ def api_stop_worker():
         print(f"[API] Stop-worker ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.get("/api/params")
+def api_params():
+    try:
+        return jsonify({
+            'take_profit_pct': TUNABLE_PARAMS['take_profit_pct'],
+            'trail_arm_pct': TUNABLE_PARAMS['trail_arm_pct'],
+            'trail_giveback_pct': TUNABLE_PARAMS['trail_giveback_pct'],
+            'stop_loss_pct': TUNABLE_PARAMS['stop_loss_pct'],
+            'min_day_volatility_pct': TUNABLE_PARAMS['min_day_volatility_pct'],
+            'volume_multiplier': TUNABLE_PARAMS['vol_mult'],
+            'ema_strictness': TUNABLE_PARAMS['ema_relax'],
+            'buying_pattern': TUNABLE_PARAMS.get('buying_pattern', 1),
+            'cooldown_minutes': COOLDOWN_MINUTES
+        })
+    except Exception as e:
+        print(f"[API] Get params ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.post("/api/update-params")
 def update_params():
     try:
@@ -2132,15 +2157,21 @@ def api_reconnect():
             account_info = bot._client.get_account()
             new_balance = get_net_usdt_value(bot._client)
             bot.current_net_usdt = new_balance
+            
+            # Force immediate balance refresh in the metrics loop
+            if hasattr(bot, '_last_balance_time'):
+                bot._last_balance_time = 0  # Reset to force immediate update
 
             print(f"[API] Successfully reconnected to Binance API")
             print(f"[API] New balance: {new_balance:.2f} USDT")
+            print(f"[API] Dashboard balance will refresh within 30 seconds")
 
             return jsonify({
                 "status": "reconnected",
                 "message": "Successfully reconnected to Binance API",
                 "balance": f"{new_balance:.2f} USDT",
-                "server_ip": get_server_ip()
+                "server_ip": get_server_ip(),
+                "force_refresh": True
             })
 
         except Exception as new_conn_error:
