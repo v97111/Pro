@@ -1229,7 +1229,7 @@ def market_sell_qty(client, symbol, qty):
                 exact_units = int(actual_qty / lot)
                 actual_qty = exact_units * lot
                 actual_qty = float(f"{actual_qty:.{required_decimals}f}")
-                print(f"[PRECISION_FIXED] Forced exact: {actual_qty:.12f}"))
+                print(f"[PRECISION_FIXED] Forced exact: {actual_qty:.12f}")
 
             print(f"[SELL] Attempting to sell {formatted_qty} {asset} (estimated value: {trade_value:.2f} USDT)")
             print(f"[FILTERS] {symbol}: tick={tick}, lot={lot}, min_notional={min_notional}")
