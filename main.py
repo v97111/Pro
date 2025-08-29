@@ -1109,7 +1109,6 @@ def market_sell_qty(client, symbol, qty):
 
             # Enhanced lot size calculation with proper precision handling
             if lot > 0:
-                import math
                 from decimal import Decimal, ROUND_DOWN
 
                 # Use Decimal for precise calculations to avoid floating point errors
@@ -1120,8 +1119,8 @@ def market_sell_qty(client, symbol, qty):
                 lot_count = int(actual_qty_decimal / lot_decimal)
                 actual_qty_decimal = lot_count * lot_decimal
 
-                # Convert back to float with proper precision
-                actual_qty = float(actual_qty_decimal)
+                # Final precise rounding using Decimal to ensure exact lot size multiple
+                actual_qty = float(actual_qty_decimal.quantize(lot_decimal, rounding=ROUND_DOWN))
 
                 # Determine decimal places based on lot size for proper formatting
                 if lot >= 1:
