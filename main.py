@@ -734,9 +734,21 @@ def get_symbol_filters(client, symbol):
         raise RuntimeError(f"{symbol} not tradable")
     tick = lot = 0.0; min_notional = 0.0
     for f in info["filters"]:
-        if f["filterType"] == "PRICE_FILTER": tick = float(f["tickSize"])
-        elif f["filterType"] == "LOT_SIZE":   lot = float(f["stepSize"])
-        elif f["filterType"] in ("NOTIONAL", "MIN_NOTIONAL"):   min_notional = float(f.get("minNotional", 0.0))
+        if f["filterType"] == "PRICE_FILTER": 
+            tick = float(f["tickSize"])
+        elif f["filterType"] == "LOT_SIZE":   
+            lot = float(f["stepSize"])
+        elif f["filterType"] == "MARKET_LOT_SIZE":   
+            # Use MARKET_LOT_SIZE for market orders if available
+            lot = float(f["stepSize"])
+        elif f["filterType"] in ("NOTIONAL", "MIN_NOTIONAL"):   
+            min_notional = float(f.get("minNotional", f.get("notional", 0.0)))
+    
+    # Fallback if lot size is 0
+    if lot == 0.0:
+        lot = 0.00001  # Default small lot size
+        
+    print(f"[FILTERS] {symbol}: tick={tick}, lot={lot}, min_notional={min_notional}")
     return tick, lot, min_notional
 
 def get_price(client, symbol): return float(client.get_symbol_ticker(symbol=symbol)["price"])
@@ -914,32 +926,58 @@ def evaluate_buy_checks(client, symbol, cache, policy):
 # ------------------ Orders ----------------------
 def market_buy_by_quote(client, symbol, quote_usdt):
     max_retries = 3
+    
+    # Check account balance first
+    try:
+        account = client.get_account()
+        usdt_balance = 0.0
+        for balance in account['balances']:
+            if balance['asset'] == 'USDT':
+                usdt_balance = float(balance['free'])
+                break
+        
+        if usdt_balance < float(quote_usdt):
+            raise RuntimeError(f"Insufficient USDT balance. Available: {usdt_balance:.2f}, Required: {quote_usdt}")
+            
+    except Exception as balance_error:
+        print(f"[BUY] Warning - Could not verify balance: {balance_error}")
+    
     for attempt in range(max_retries):
         try:
             price = get_price_cached(client, symbol)
-            _, _, min_notional = get_symbol_filters(client, symbol)
-            min_req = max(10.0, min_notional)
+            tick, lot, min_notional = get_symbol_filters(client, symbol)
+            min_req = max(10.0, min_notional * 1.1)  # Add 10% buffer
             spend = max(float(quote_usdt), min_req)
 
-            print(f"[BUY] Attempting to buy {symbol} with {spend:.2f} USDT at ~{price:.6f}")
+            print(f"[BUY] Attempting to buy {symbol} with {spend:.2f} USDT at ~{price:.6f} (lot: {lot})")
 
             try:
+                # Try quoteOrderQty first (preferred for market orders)
                 order = client.create_order(symbol=symbol, side="BUY", type="MARKET", quoteOrderQty=round(spend, 2))
             except Exception as quote_error:
                 print(f"[BUY] QuoteOrderQty failed for {symbol}, using quantity method: {quote_error}")
-                # Fallback to quantity-based if quoteOrderQty unsupported
-                info = client.get_symbol_info(symbol)
-                lot = 0.0
-                for f in info.get("filters", []):
-                    if f.get("filterType") in ("MARKET_LOT_SIZE", "LOT_SIZE"):
-                        lot = float(f.get("stepSize", 0.0))
-                        break
-                qty = round_to(spend / price, lot)
+                
+                # Calculate quantity with proper precision
+                raw_qty = spend / price
+                
+                # Apply lot size rounding properly
+                if lot > 0:
+                    # Calculate decimal places needed for lot size
+                    lot_str = f"{lot:.10f}".rstrip('0').rstrip('.')
+                    decimal_places = len(lot_str.split('.')[-1]) if '.' in lot_str else 0
+                    qty = round(raw_qty // lot * lot, decimal_places)
+                else:
+                    qty = round(raw_qty, 8)  # Default 8 decimals
+                
                 if qty <= 0:
-                    raise RuntimeError(f"Quantity rounded to 0; increase amount. Spend: {spend}, Price: {price}, Lot: {lot}")
+                    raise RuntimeError(f"Quantity rounded to 0. Raw: {raw_qty}, Lot: {lot}, Final: {qty}")
+                
+                print(f"[BUY] Using quantity: {qty} (from {raw_qty:.8f}, lot: {lot})")
                 order = client.create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
             break
         except Exception as e:
+            if "insufficient balance" in str(e).lower():
+                raise RuntimeError(f"Insufficient balance confirmed by exchange: {e}")
             if attempt == max_retries - 1:
                 raise RuntimeError(f"Failed to execute buy order for {symbol} after {max_retries} attempts: {e}")
             print(f"[WARN] Buy attempt {attempt + 1} failed for {symbol}: {e}")
@@ -979,35 +1017,28 @@ def market_sell_qty(client, symbol, qty):
             # Use the EXACT available balance instead of requested qty to sell everything
             actual_qty = available_qty
             
-            info = client.get_symbol_info(symbol)
-            lot = None
-            for f in info.get("filters", []):
-                if f.get("filterType") == "MARKET_LOT_SIZE":
-                    lot = float(f.get("stepSize", 0.0))
-                    break
-            if lot is None:
-                _, lot, _ = get_symbol_filters(client, symbol)
+            # Get proper lot size with better filtering
+            tick, lot, min_notional = get_symbol_filters(client, symbol)
             
-            # Only round if absolutely necessary (when lot size precision is larger than our balance)
-            # This preserves maximum sellable quantity
-            if lot > 0 and actual_qty % lot != 0:
-                actual_qty = round_to(actual_qty, lot)
+            # Apply lot size rounding with proper precision
+            if lot > 0:
+                # Calculate decimal places for proper rounding
+                lot_str = f"{lot:.10f}".rstrip('0').rstrip('.')
+                decimal_places = len(lot_str.split('.')[-1]) if '.' in lot_str else 0
+                actual_qty = round(actual_qty // lot * lot, decimal_places)
             
             if actual_qty <= 0:
-                raise RuntimeError(f"Quantity rounds to 0 after applying lot size filter. Available: {available_qty}, Lot size: {lot}")
+                raise RuntimeError(f"Quantity rounds to 0 after lot size filter. Available: {available_qty}, Lot: {lot}")
 
-            # Enforce min notional to avoid rejections
+            # Check min notional requirement
             price = get_price_cached(client, symbol)
-            min_notional = 0.0
-            for f in info.get("filters", []):
-                if f.get("filterType") in ("NOTIONAL", "MIN_NOTIONAL"):
-                    min_notional = float(f.get("minNotional", 0.0))
-                    break
-            min_req = max(10.0, min_notional)
-            if price * actual_qty < min_req:
-                raise RuntimeError(f"Position below min notional; cannot sell this size. Value: {price * actual_qty:.2f}, Required: {min_req:.2f}")
+            min_req = max(10.0, min_notional * 1.1)  # Add 10% buffer
+            trade_value = price * actual_qty
+            
+            if trade_value < min_req:
+                raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_req:.2f}")
 
-            print(f"[SELL] Attempting to sell ALL {actual_qty} {asset} (available: {available_qty}, lot size: {lot})")
+            print(f"[SELL] Selling {actual_qty} {asset} (value: {trade_value:.2f} USDT, lot: {lot})")
             order = client.create_order(symbol=symbol, side="SELL", type="MARKET", quantity=actual_qty)
             break
         except Exception as e:
@@ -1020,7 +1051,7 @@ def market_sell_qty(client, symbol, qty):
     if fills:
         earned = sum(float(f["price"]) * float(f["qty"]) for f in fills)
         sold = sum(float(f["qty"]) for f in fills)
-        avg_price = earned / sold
+        avg_price = earned / sold if sold > 0 else price
         qty = sold
     else:
         avg_price = price
@@ -1266,17 +1297,30 @@ class FastCycleBot:
             if not self._running:
                 raise RuntimeError("Failed to start bot core.")
 
-        # Check if we have sufficient balance - STRICT validation
+        # Enhanced balance validation
         try:
-            current_balance = get_net_usdt_value(self._client)
-            if current_balance < quote_amount:
-                raise RuntimeError(f"Insufficient balance. Available: {current_balance:.2f} USDT, Required: {quote_amount:.2f} USDT")
+            account = self._client.get_account()
+            usdt_balance = 0.0
+            for balance in account['balances']:
+                if balance['asset'] == 'USDT':
+                    usdt_balance = float(balance['free'])
+                    break
+            
+            # Add buffer for fees and existing workers
+            total_allocated = sum(worker.quote for worker in self._worker_state.values())
+            required_balance = quote_amount + total_allocated
+            buffer_needed = required_balance * 0.05  # 5% buffer for fees
+            
+            if usdt_balance < (quote_amount + buffer_needed):
+                raise RuntimeError(f"Insufficient USDT balance. Available: {usdt_balance:.2f}, Required: {quote_amount:.2f} + {buffer_needed:.2f} buffer")
+                
+            print(f"[Bot] Balance check: {usdt_balance:.2f} USDT available, {quote_amount:.2f} requested")
+            
         except Exception as e:
-            # If we can't check balance, fail safely
-            if "Insufficient balance" in str(e):
-                raise e  # Re-raise balance errors
+            if "Insufficient" in str(e):
+                raise e
             else:
-                raise RuntimeError(f"Cannot verify balance before adding worker: {e}")
+                raise RuntimeError(f"Cannot verify USDT balance: {e}")
 
         with self._lock:
             # Check worker limit
