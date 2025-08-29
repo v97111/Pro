@@ -45,31 +45,31 @@ class ConsoleCapture:
         self.original_stdout = sys.stdout
         self.original_stderr = sys.stderr
         self.capturing = True
-        
+
     def write(self, data):
         # Write to original stdout first
         self.original_stdout.write(data)
         self.original_stdout.flush()
-        
+
         # Only capture if enabled and data is meaningful
         if self.capturing and data and data.strip() and not data.isspace():
             timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             with self.lock:
                 self.lines.append(f"[{timestamp}] {data.strip()}")
-    
+
     def flush(self):
         self.original_stdout.flush()
-    
+
     def get_lines(self, limit=None):
         with self.lock:
             lines_list = list(self.lines)
             if limit:
                 return lines_list[-limit:]
             return lines_list
-    
+
     def disable_capture(self):
         self.capturing = False
-    
+
     def enable_capture(self):
         self.capturing = True
 
@@ -404,7 +404,7 @@ class TradeAnalyzer:
                     for i, order in enumerate(all_orders[:10]):
                         print(f"  {i+1}. {order['action']} {order['symbol']} W{order['worker_id']} PnL:{order['pnl_pct']}")
 
-                if trades:
+                if len(trades) > 0:
                     print(f"[TradeAnalyzer] Sample trades:")
                     for i, trade in enumerate(trades[:3]):
                         print(f"  {i+1}. {trade['symbol']}: {trade['pnl_pct']:+.2f}%")
@@ -1110,6 +1110,7 @@ def market_sell_qty(client, symbol, qty):
             # Enhanced lot size calculation with proper precision handling
             if lot > 0:
                 from decimal import Decimal, ROUND_DOWN
+                import math
 
                 # Use Decimal for precise calculations to avoid floating point errors
                 actual_qty_decimal = Decimal(str(actual_qty))
@@ -1117,38 +1118,51 @@ def market_sell_qty(client, symbol, qty):
 
                 # Calculate how many complete lot sizes fit in available quantity
                 lot_count = int(actual_qty_decimal / lot_decimal)
-                actual_qty_decimal = lot_count * lot_decimal
 
-                # Final precise rounding using Decimal to ensure exact lot size multiple
-                actual_qty = float(actual_qty_decimal.quantize(lot_decimal, rounding=ROUND_DOWN))
+                # Ensure we use floor division to avoid any remainder
+                adjusted_qty_decimal = lot_count * lot_decimal
 
-                # Determine decimal places based on lot size for proper formatting
-                if lot >= 1:
-                    decimal_places = 0
+                # Determine precision based on lot size for exact formatting
+                if lot >= 1.0:
+                    precision = Decimal('1')
                 elif lot >= 0.1:
-                    decimal_places = 1
+                    precision = Decimal('0.1')
                 elif lot >= 0.01:
-                    decimal_places = 2
+                    precision = Decimal('0.01')
                 elif lot >= 0.001:
-                    decimal_places = 3
+                    precision = Decimal('0.001')
                 elif lot >= 0.0001:
-                    decimal_places = 4
+                    precision = Decimal('0.0001')
                 elif lot >= 0.00001:
-                    decimal_places = 5
+                    precision = Decimal('0.00001')
                 elif lot >= 0.000001:
-                    decimal_places = 6
+                    precision = Decimal('0.000001')
                 elif lot >= 0.0000001:
-                    decimal_places = 7
+                    precision = Decimal('0.0000001')
                 else:
-                    decimal_places = 8
+                    precision = Decimal('0.00000001')
 
-                # Final precise rounding using Decimal to ensure exact lot size multiple
-                actual_qty = float(Decimal(str(actual_qty)).quantize(
-                    Decimal(str(lot)), rounding=ROUND_DOWN
-                ))
+                # Final quantization to exact lot size precision
+                actual_qty = float(adjusted_qty_decimal.quantize(precision, rounding=ROUND_DOWN))
+
+                # Double verification: ensure result is exact multiple of lot size
+                remainder = actual_qty % lot
+                if abs(remainder) > lot / 1000:  # Allow tiny tolerance
+                    # Force to exact multiple using mathematical floor
+                    exact_lots = math.floor(actual_qty / lot)
+                    actual_qty = exact_lots * lot
 
             if actual_qty <= 0:
                 raise RuntimeError(f"Quantity rounds to 0 after lot size filter. Available: {available_qty:.8f}, Lot: {lot}")
+
+            # Final verification that quantity is valid multiple of lot size
+            remainder_check = actual_qty % lot
+            if abs(remainder_check) > 1e-10:  # Very strict precision check
+                print(f"[WARN] Quantity precision issue detected, adjusting...")
+                # Force exact multiple using integer arithmetic
+                lot_units = int(actual_qty / lot)
+                actual_qty = lot_units * lot
+                print(f"[FIX] Adjusted to exact lot multiple: {actual_qty}")
 
             # Check min notional requirement
             price = get_price_cached(client, symbol)
@@ -1158,9 +1172,32 @@ def market_sell_qty(client, symbol, qty):
             if trade_value < min_req:
                 raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_req:.2f}")
 
-            print(f"[SELL] Attempting to sell {actual_qty} {asset} (estimated value: {trade_value:.2f} USDT)")
+            # Format quantity to appropriate precision for API call
+            if lot >= 1.0:
+                formatted_qty = f"{actual_qty:.0f}"
+            elif lot >= 0.1:
+                formatted_qty = f"{actual_qty:.1f}"
+            elif lot >= 0.01:
+                formatted_qty = f"{actual_qty:.2f}"
+            elif lot >= 0.001:
+                formatted_qty = f"{actual_qty:.3f}"
+            elif lot >= 0.0001:
+                formatted_qty = f"{actual_qty:.4f}"
+            elif lot >= 0.00001:
+                formatted_qty = f"{actual_qty:.5f}"
+            elif lot >= 0.000001:
+                formatted_qty = f"{actual_qty:.6f}"
+            elif lot >= 0.0000001:
+                formatted_qty = f"{actual_qty:.7f}"
+            else:
+                formatted_qty = f"{actual_qty:.8f}"
+
+            # Remove trailing zeros and convert back to float
+            actual_qty = float(formatted_qty)
+
+            print(f"[SELL] Attempting to sell {formatted_qty} {asset} (estimated value: {trade_value:.2f} USDT)")
             print(f"[FILTERS] {symbol}: tick={tick}, lot={lot}, min_notional={min_notional}")
-            print(f"[LOT_DEBUG] Original qty: {available_qty:.8f}, Lot size: {lot}, Calculated qty: {actual_qty:.8f}, Lot multiple check: {actual_qty % lot:.10f}")
+            print(f"[LOT_DEBUG] Original qty: {available_qty:.8f}, Lot size: {lot}, Final qty: {actual_qty}, Remainder: {actual_qty % lot:.12f}")
 
             order = client.create_order(symbol=symbol, side="SELL", type="MARKET", quantity=actual_qty)
             print(f"[SELL] Order executed successfully")
@@ -1403,7 +1440,7 @@ class FastCycleBot:
                             print(f"[WARN] API permission error - balance fetch failed: {error_msg}")
                         else:
                             print(f"[WARN] Balance fetch failed (attempt {consecutive_failures}): {e}")
-                        
+
                         if consecutive_failures > 5:
                             print("[WARN] Too many balance fetch failures, pausing updates")
                             time.sleep(120)  # Wait 2 minutes before retrying
@@ -2085,14 +2122,14 @@ def update_params():
 def api_console():
     try:
         limit = request.args.get('limit', 100, type=int)
-        
+
         # Get real console output from capture system
         global console_capture
         lines = console_capture.get_lines(limit)
-        
+
         if not lines:
             lines = ["Bot initialized - Console output will appear here"]
-            
+
         return jsonify({"lines": lines, "total": len(lines)})
     except Exception as e:
         return jsonify({"error": str(e), "lines": []}), 500
@@ -2106,17 +2143,17 @@ def api_console_stream():
                 global console_capture
                 current_lines = console_capture.get_lines()
                 current_count = len(current_lines)
-                
+
                 if current_count > last_count:
                     new_lines = current_lines[last_count:]
                     for line in new_lines:
                         yield f"data: {json.dumps({'line': line})}\n\n"
                     last_count = current_count
-                
+
                 time.sleep(1)  # Check every second for real-time updates
             except Exception:
                 break
-    
+
     return Response(generate(), mimetype='text/event-stream',
                    headers={'Cache-Control': 'no-cache'})
 
@@ -2159,7 +2196,7 @@ def api_reconnect():
             account_info = bot._client.get_account()
             new_balance = get_net_usdt_value(bot._client)
             bot.current_net_usdt = new_balance
-            
+
             # Force immediate balance refresh in the metrics loop
             if hasattr(bot, '_last_balance_time'):
                 bot._last_balance_time = 0  # Reset to force immediate update
