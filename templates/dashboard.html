@@ -971,7 +971,7 @@
                     try {
                         const data = JSON.parse(event.data);
                         const consoleDiv = document.getElementById('consoleOutput');
-                        
+
                         // Append new line to existing content
                         if (consoleDiv.value) {
                             consoleDiv.value += '\n' + data.line;
@@ -1041,12 +1041,12 @@
             const btn = document.getElementById('autoscroll-btn');
             btn.textContent = `Auto-scroll: ${autoScroll ? 'ON' : 'OFF'}`;
             btn.className = autoScroll ? 'btn btn-primary' : 'btn btn-secondary';
-            
+
             if (autoScroll) {
                 const consoleDiv = document.getElementById('consoleOutput');
                 consoleDiv.scrollTop = consoleDiv.scrollHeight;
             }
-            
+
             logHealth(`Console auto-scroll: ${autoScroll ? 'ENABLED' : 'DISABLED'}`);
         }
 
@@ -1167,6 +1167,14 @@
                     if (data.balance) {
                         console.log(`💰 Balance: ${data.balance}`);
                         logHealth(`💰 Current balance: ${data.balance}`);
+                    }
+
+                    // Force immediate status refresh to update dashboard balance
+                    if (data.force_refresh) {
+                        logHealth('🔄 Forcing dashboard refresh...');
+                        setTimeout(() => {
+                            refreshStatus();
+                        }, 2000); // Wait 2 seconds then refresh
                     }
 
                     alert(`✅ ${data.message}\n💰 Balance: ${data.balance || 'Unknown'}\n🌐 IP: ${data.server_ip || 'Unknown'}`);
@@ -1530,7 +1538,7 @@
             `).join('');
         }
 
-        async function refreshData(loadParams = false) {
+        async function refreshStatus() { // Renamed from refreshData to avoid confusion with refreshTrades
             try {
                 const controller = new AbortController();
                 const timeoutId = setTimeout(() => controller.abort(), 3000);
@@ -1593,20 +1601,6 @@
                 document.getElementById('totalBuys').textContent = status.total_buys || 0;
                 document.getElementById('totalSells').textContent = status.total_sells || 0;
 
-                // Only load parameters when explicitly requested (manual refresh or after update)
-                if (loadParams && status.tunable_params) {
-                    loadParameters(status.tunable_params);
-
-                    // Show brief visual confirmation that params were loaded
-                    const updateBtn = document.querySelector('.card .btn-primary');
-                    if (updateBtn && updateBtn.textContent === 'Update') {
-                        updateBtn.style.opacity = '0.7';
-                        setTimeout(() => {
-                            updateBtn.style.opacity = '1';
-                        }, 200);
-                    }
-                }
-
                 // Render positions with real-time updates
                 renderPositions(status.workers || []);
 
@@ -1631,6 +1625,34 @@
                 }
             }
         }
+
+        // Renamed refreshData to refreshStatus to avoid confusion
+        async function refreshData(loadParams = false) {
+            await refreshStatus(); // Call the renamed function
+
+            // Load parameters only when explicitly requested
+            if (loadParams) {
+                try {
+                    const paramsResponse = await fetch('/api/params', { cache: 'no-cache' });
+                    if (paramsResponse.ok) {
+                        const params = await paramsResponse.json();
+                        loadParameters(params);
+                        const updateBtn = document.querySelector('.card .btn-primary');
+                        if (updateBtn && updateBtn.textContent === 'Update') {
+                            updateBtn.style.opacity = '0.7';
+                            setTimeout(() => {
+                                updateBtn.style.opacity = '1';
+                            }, 200);
+                        }
+                    } else {
+                        console.warn('Failed to load parameters');
+                    }
+                } catch (e) {
+                    console.warn('Error fetching parameters:', e);
+                }
+            }
+        }
+
 
         async function refreshTrades() {
             try {
