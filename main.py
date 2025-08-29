@@ -1086,9 +1086,11 @@ def market_buy_by_quote(client, symbol, quote_usdt):
 
 def market_sell_qty(client, symbol, qty):
     """
-    Sell exact quantity using Binance's recommended approach for lot size compliance.
-    This implements the official Binance solution for handling floating point precision in lot sizes.
+    Sell exact quantity using precise Decimal arithmetic to avoid floating-point errors.
+    This implements Binance's lot size compliance requirements with mathematical precision.
     """
+    from decimal import Decimal, ROUND_DOWN
+    
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -1108,46 +1110,34 @@ def market_sell_qty(client, symbol, qty):
             # Get symbol filters
             tick, lot, min_notional = get_symbol_filters(client, symbol)
             
-            # BINANCE OFFICIAL METHOD: Use step size to calculate valid quantity
-            # This is the exact method recommended in Binance API documentation
-            
-            # Method 1: Direct integer division approach (most reliable)
+            # PRECISE DECIMAL CALCULATION METHOD
             if lot > 0:
-                # Convert lot size to find the precision (number of decimal places)
+                # Use Decimal for exact arithmetic
+                available_decimal = Decimal(str(available_qty))
+                lot_decimal = Decimal(str(lot))
+                
+                # Calculate exact number of lot units we can sell
+                lot_units = available_decimal // lot_decimal
+                
+                # Calculate exact sellable quantity
+                sellable_decimal = lot_units * lot_decimal
+                
+                # Convert back to float for API call
+                actual_qty = float(sellable_decimal)
+                
+                # Determine precision from lot size
                 lot_str = f"{lot:.20f}".rstrip('0').rstrip('.')
                 if '.' in lot_str:
                     precision = len(lot_str.split('.')[1])
                 else:
                     precision = 0
                 
-                # Convert to the smallest unit to avoid floating point errors
-                multiplier = 10 ** precision
-                available_units = int(available_qty * multiplier)
-                lot_units = int(lot * multiplier)
+                print(f"[DECIMAL_METHOD] Available: {available_qty:.8f}, Lot: {lot}")
+                print(f"[DECIMAL_METHOD] Lot units: {lot_units}, Sellable qty: {actual_qty:.8f}")
                 
-                # Calculate how many complete lot sizes we can sell
-                sellable_units = (available_units // lot_units) * lot_units
-                
-                # Convert back to actual quantity
-                sellable_qty = sellable_units / multiplier
-                
-                # Apply precision formatting to match lot size
-                actual_qty = round(sellable_qty, precision)
-                
-                print(f"[LOT_SIZE_BINANCE] Available: {available_qty:.8f}, Lot: {lot}, Precision: {precision}")
-                print(f"[LOT_SIZE_BINANCE] Available units: {available_units}, Lot units: {lot_units}")
-                print(f"[LOT_SIZE_BINANCE] Sellable units: {sellable_units}, Final qty: {actual_qty:.8f}")
-                
-                # Verify the calculation is exact
-                remainder = abs(actual_qty % lot)
-                if remainder > 1e-10:
-                    print(f"[LOT_SIZE_WARNING] Still has remainder {remainder:.12f}, forcing floor division")
-                    # Force exact compliance by using floor division
-                    exact_units = int(available_qty / lot)
-                    actual_qty = exact_units * lot
-                    actual_qty = round(actual_qty, precision)
-                
-                print(f"[LOT_SIZE_FINAL] Selling {actual_qty:.8f} (remainder: {actual_qty % lot:.15f})")
+                # Final verification - should be exactly zero remainder
+                remainder_check = actual_qty % lot
+                print(f"[DECIMAL_VERIFY] Remainder check: {remainder_check:.20f}")
                 
             else:
                 actual_qty = available_qty
@@ -1162,26 +1152,17 @@ def market_sell_qty(client, symbol, qty):
             min_req = max(5.0, min_notional * 1.02)  # Small buffer for price movement
             
             if trade_value < min_req:
-                # If trade value is too small, reduce quantity to meet minimum
-                print(f"[NOTIONAL_ADJUST] Trade value {trade_value:.2f} below minimum {min_req:.2f}")
-                # Try selling slightly less to ensure we meet minimum notional
-                if actual_qty > lot:
-                    actual_qty -= lot
-                    trade_value = price * actual_qty
-                    print(f"[NOTIONAL_ADJUST] Reduced to {actual_qty:.8f}, new value: {trade_value:.2f}")
-                
-                if trade_value < min_req:
-                    raise RuntimeError(f"Cannot meet minimum notional requirement. Trade value: {trade_value:.2f}, Required: {min_req:.2f}")
+                raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_req:.2f}. Cannot proceed with sale.")
 
-            # Format quantity string for API call
-            qty_str = f"{actual_qty:.{precision}f}".rstrip('0').rstrip('.')
-            if '.' not in qty_str and precision > 0:
+            # Format quantity for API call using exact decimal representation
+            if precision > 0:
                 qty_str = f"{actual_qty:.{precision}f}"
+            else:
+                qty_str = str(int(actual_qty))
             
-            print(f"[SELL] Selling {qty_str} {asset} (value: {trade_value:.2f} USDT)")
-            print(f"[SELL] Final verification - Qty: {actual_qty:.8f}, Lot: {lot}, Remainder: {actual_qty % lot:.15f}")
+            print(f"[SELL] Executing order: {qty_str} {asset} (value: {trade_value:.2f} USDT)")
 
-            # Execute the order using the properly formatted quantity
+            # Execute the order using the precisely calculated quantity
             order = client.create_order(
                 symbol=symbol, 
                 side="SELL", 
@@ -1196,43 +1177,44 @@ def market_sell_qty(client, symbol, qty):
             error_msg = str(e).lower()
             
             # Handle specific error types
-            if "lot_size" in error_msg:
+            if "lot_size" in error_msg and "code=-1013" in str(e):
                 print(f"[ERROR] LOT_SIZE filter failure on attempt {attempt + 1}: {e}")
-                # Extract the actual error details if possible
-                if "code=-1013" in str(e):
-                    print(f"[ERROR] Binance error code -1013: Filter failure LOT_SIZE")
-                    print(f"[ERROR] This means the quantity {actual_qty:.8f} is not a valid multiple of {lot}")
-                    
-                    # Try a more aggressive approach - use only the integer part of lot units
-                    if attempt == max_retries - 1:
-                        print(f"[CRITICAL] All attempts failed. Selling maximum valid quantity...")
-                        # Last resort: sell the largest valid quantity
-                        max_valid_units = int(available_qty / lot)
-                        if max_valid_units > 0:
-                            emergency_qty = max_valid_units * lot
-                            print(f"[EMERGENCY] Attempting emergency sell of {emergency_qty:.8f}")
-                            try:
-                                order = client.create_order(
-                                    symbol=symbol, 
-                                    side="SELL", 
-                                    type="MARKET", 
-                                    quantity=f"{emergency_qty:.{precision}f}".rstrip('0').rstrip('.')
-                                )
-                                print(f"[EMERGENCY] Emergency sell successful")
-                                break
-                            except Exception as emergency_error:
-                                print(f"[EMERGENCY] Emergency sell also failed: {emergency_error}")
-                                raise e
+                
+                # On final attempt, try emergency method
+                if attempt == max_retries - 1:
+                    print(f"[EMERGENCY] Using Decimal arithmetic emergency method...")
+                    try:
+                        from decimal import Decimal
+                        # Emergency: Use pure decimal calculation
+                        available_decimal = Decimal(str(available_qty))
+                        lot_decimal = Decimal(str(lot))
+                        emergency_units = int(available_decimal / lot_decimal)
+                        
+                        if emergency_units > 0:
+                            emergency_qty = float(emergency_units * lot_decimal)
+                            emergency_str = f"{emergency_qty:.{precision}f}" if precision > 0 else str(int(emergency_qty))
+                            
+                            print(f"[EMERGENCY] Final attempt with {emergency_str} {asset}")
+                            
+                            order = client.create_order(
+                                symbol=symbol, 
+                                side="SELL", 
+                                type="MARKET", 
+                                quantity=emergency_str
+                            )
+                            print(f"[EMERGENCY] Emergency sell successful with {emergency_str}")
+                            break
                         else:
                             raise RuntimeError(f"Cannot sell any valid quantity. Available: {available_qty:.8f}, Lot: {lot}")
+                    except Exception as emergency_error:
+                        print(f"[EMERGENCY] Emergency method failed: {emergency_error}")
+                        raise e
             
-            elif "precision" in error_msg:
-                print(f"[ERROR] Precision error on attempt {attempt + 1}: {e}")
             elif "insufficient" in error_msg:
                 print(f"[ERROR] Insufficient balance error: {e}")
                 break  # Don't retry on balance issues
             else:
-                print(f"[ERROR] Other error on attempt {attempt + 1}: {e}")
+                print(f"[ERROR] Attempt {attempt + 1} failed: {e}")
 
             if attempt == max_retries - 1:
                 raise RuntimeError(f"Failed to execute sell order for {symbol} after {max_retries} attempts: {e}")
