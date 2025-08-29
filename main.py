@@ -213,7 +213,7 @@ class TradeAnalyzer:
         self._analysis_cache = {}
         self._cache_timestamp = 0
         self.cache_ttl = 300  # 5 minutes
-        
+
     def invalidate_cache(self):
         """Force cache refresh on next access"""
         self._analysis_cache = {}
@@ -228,18 +228,18 @@ class TradeAnalyzer:
 
         trades = []
         all_orders = []  # Store all orders chronologically
-        
+
         try:
             if not os.path.exists(self.csv_file):
                 print(f"[TradeAnalyzer] CSV file not found: {self.csv_file}")
                 self._analysis_cache = []
                 self._cache_timestamp = current_time
                 return self._analysis_cache
-                
+
             with open(self.csv_file, 'r', encoding='utf-8') as f:
                 import csv as csv_module
                 from datetime import datetime
-                
+
                 # Skip header and manually parse CSV to avoid issues
                 lines = f.readlines()
                 if len(lines) < 2:
@@ -247,11 +247,11 @@ class TradeAnalyzer:
                     self._analysis_cache = []
                     self._cache_timestamp = current_time
                     return []
-                
+
                 # Skip header line
                 data_lines = lines[1:]
                 row_count = 0
-                
+
                 # First pass: collect all orders
                 for line in data_lines:
                     row_count += 1
@@ -260,7 +260,7 @@ class TradeAnalyzer:
                         parts = line.strip().split(',')
                         if len(parts) < 8:  # Need at least 8 columns
                             continue
-                            
+
                         time_str = parts[0].strip()
                         symbol = parts[1].strip()
                         action = parts[2].strip()
@@ -269,16 +269,16 @@ class TradeAnalyzer:
                         pnl_str = parts[5].strip()
                         note = parts[6].strip()
                         worker_id = parts[7].strip()
-                        
+
                         if not symbol or not worker_id or not action or not time_str:
                             continue
-                        
+
                         # Parse timestamp for chronological matching
                         try:
                             timestamp = datetime.fromisoformat(time_str.replace('Z', '+00:00'))
                         except:
                             continue
-                            
+
                         order = {
                             'symbol': symbol,
                             'action': action,
@@ -291,20 +291,20 @@ class TradeAnalyzer:
                             'note': note
                         }
                         all_orders.append(order)
-                        
+
                     except (ValueError, TypeError, KeyError) as e:
                         print(f"[TradeAnalyzer] Error parsing row {row_count}: {e}")
                         continue
-                
+
                 # Sort orders by timestamp
                 all_orders.sort(key=lambda x: x['timestamp'])
-                
+
                 # Second pass: match BUYs with SELLs chronologically by worker+symbol
                 pending_buys = {}  # Key: "symbol_worker_id" -> buy_order
-                
+
                 buy_count = 0
                 sell_count = 0
-                
+
                 for order in all_orders:
                     if order['action'] == 'BUY':
                         buy_count += 1
@@ -313,17 +313,17 @@ class TradeAnalyzer:
                         pending_buys[key] = order
                         if buy_count <= 3:  # Log first few for debugging
                             print(f"[TradeAnalyzer] BUY order: {order['symbol']} W{order['worker_id']} @ {order['price']}")
-                        
+
                     elif order['action'].startswith('SELL'):
                         sell_count += 1
                         # Look for matching BUY order with same worker+symbol
                         key = f"{order['symbol']}_{order['worker_id']}"
                         matching_buy = pending_buys.pop(key, None)
-                        
+
                         if sell_count <= 3:  # Log first few for debugging
                             print(f"[TradeAnalyzer] SELL order: {order['symbol']} W{order['worker_id']} @ {order['price']} PnL: {order['pnl_pct']}")
                             print(f"[TradeAnalyzer] Looking for key: {key}, Found match: {'Yes' if matching_buy else 'No'}")
-                        
+
                         if matching_buy:
                             # Create completed trade
                             trade = {
@@ -345,23 +345,23 @@ class TradeAnalyzer:
                             print(f"[TradeAnalyzer] Matched trade: {order['symbol']} W{order['worker_id']} PnL: {order['pnl_pct']:+.2f}%")
                         else:
                             print(f"[TradeAnalyzer] No matching BUY found for SELL: {order['symbol']} W{order['worker_id']}")
-                
+
                 print(f"[TradeAnalyzer] Processed {row_count} CSV rows")
                 print(f"[TradeAnalyzer] Found {buy_count} BUY orders, {sell_count} SELL orders")
                 print(f"[TradeAnalyzer] Found {len(trades)} complete trades")
                 print(f"[TradeAnalyzer] {len(pending_buys)} unmatched BUY orders remaining")
-                
+
                 if len(pending_buys) > 0:
                     print(f"[TradeAnalyzer] Sample unmatched BUYs:")
                     for i, (key, buy) in enumerate(list(pending_buys.items())[:5]):
                         print(f"  {i+1}. {key}: {buy['symbol']} W{buy['worker_id']} @ {buy['price']}")
-                
+
                 # Show sample of orders if no trades found
                 if len(trades) == 0 and len(all_orders) > 0:
                     print(f"[TradeAnalyzer] Sample orders from CSV:")
                     for i, order in enumerate(all_orders[:10]):
                         print(f"  {i+1}. {order['action']} {order['symbol']} W{order['worker_id']} PnL:{order['pnl_pct']}")
-                
+
                 if trades:
                     print(f"[TradeAnalyzer] Sample trades:")
                     for i, trade in enumerate(trades[:3]):
@@ -370,7 +370,7 @@ class TradeAnalyzer:
             self._analysis_cache = trades
             self._cache_timestamp = current_time
             return self._analysis_cache
-            
+
         except Exception as e:
             print(f"[TradeAnalyzer] Error loading trades data: {e}")
             import traceback
@@ -393,7 +393,7 @@ class TradeAnalyzer:
         """Get comprehensive trading analysis"""
         try:
             trades = self._get_trades_data()
-            
+
             if not trades:
                 return {
                     "total_trades": 0,
@@ -419,25 +419,25 @@ class TradeAnalyzer:
             total_trades = len(trades)
             winners = [t for t in trades if t.get('pnl_pct', 0) > 0]
             losers = [t for t in trades if t.get('pnl_pct', 0) <= 0]
-            
+
             win_rate = (len(winners) / total_trades * 100) if total_trades > 0 else 0.0
             pnl_values = [t.get('pnl_pct', 0) for t in trades]
             avg_pnl = sum(pnl_values) / total_trades if total_trades > 0 else 0.0
             total_pnl = sum(pnl_values)
-            
+
             # Duration analysis
             durations = [t.get('duration_minutes', 0) for t in trades if t.get('duration_minutes', 0) > 0]
             avg_duration = sum(durations) / len(durations) if durations else 0.0
 
             # Symbol performance
             symbol_stats = self.analyze_symbol_performance()
-            
+
             # Performance by time of day
             time_performance = self._analyze_time_performance(trades)
-            
+
             # Risk metrics
             risk_metrics = self._calculate_risk_metrics(trades)
-            
+
             # Recommendations
             recommendations = self._generate_recommendations(trades, win_rate, total_pnl, symbol_stats)
 
@@ -454,7 +454,7 @@ class TradeAnalyzer:
                 "risk_metrics": risk_metrics,
                 "recommendations": recommendations
             }
-            
+
         except Exception as e:
             print(f"[TradeAnalyzer] Error in comprehensive analysis: {e}")
             return {
@@ -475,48 +475,48 @@ class TradeAnalyzer:
     def _analyze_time_performance(self, trades):
         """Analyze performance by time of day"""
         time_stats = defaultdict(lambda: {'trades': 0, 'pnl': 0, 'wins': 0})
-        
+
         for trade in trades:
             try:
                 from datetime import datetime
                 trade_time = datetime.fromisoformat(trade['buy_time'].replace('Z', '+00:00'))
                 hour = trade_time.hour
                 time_bucket = f"{hour:02d}:00"
-                
+
                 time_stats[time_bucket]['trades'] += 1
                 time_stats[time_bucket]['pnl'] += trade['pnl_pct']
                 if trade['pnl_pct'] > 0:
                     time_stats[time_bucket]['wins'] += 1
             except:
                 continue
-        
+
         # Calculate win rates
         for time_bucket, stats in time_stats.items():
             if stats['trades'] > 0:
                 stats['win_rate'] = (stats['wins'] / stats['trades']) * 100
                 stats['avg_pnl'] = stats['pnl'] / stats['trades']
-        
+
         return dict(time_stats)
 
     def _calculate_risk_metrics(self, trades):
         """Calculate risk and volatility metrics"""
         if not trades:
             return {}
-        
+
         pnls = [t['pnl_pct'] for t in trades]
-        
+
         # Calculate volatility (standard deviation)
         mean_pnl = sum(pnls) / len(pnls)
         variance = sum((x - mean_pnl) ** 2 for x in pnls) / len(pnls)
         volatility = variance ** 0.5
-        
+
         # Max drawdown
         cumulative_pnl = []
         running_total = 0
         for pnl in pnls:
             running_total += pnl
             cumulative_pnl.append(running_total)
-        
+
         peak = cumulative_pnl[0]
         max_drawdown = 0
         for value in cumulative_pnl:
@@ -525,10 +525,10 @@ class TradeAnalyzer:
             drawdown = peak - value
             if drawdown > max_drawdown:
                 max_drawdown = drawdown
-        
+
         # Sharpe ratio approximation (using daily returns)
         sharpe_ratio = (mean_pnl / volatility) if volatility > 0 else 0
-        
+
         return {
             "volatility": round(volatility, 4),
             "max_drawdown": round(max_drawdown, 4),
@@ -540,7 +540,7 @@ class TradeAnalyzer:
     def _generate_recommendations(self, trades, win_rate, total_pnl, symbol_stats):
         """Generate intelligent recommendations"""
         recommendations = []
-        
+
         if win_rate < 45:
             recommendations.append({
                 "type": "strategy",
@@ -548,26 +548,26 @@ class TradeAnalyzer:
                 "message": f"Win rate is low at {win_rate:.1f}%. Consider stricter entry conditions.",
                 "action": "Increase volume requirements or switch to more conservative parameters"
             })
-        
+
         if total_pnl < 0:
             recommendations.append({
-                "type": "risk_management", 
+                "type": "risk_management",
                 "priority": "high",
                 "message": f"Overall PnL is negative at {total_pnl:.2f}%. Risk management needs improvement.",
                 "action": "Reduce position sizes and tighten stop losses"
             })
-        
+
         # Symbol-specific recommendations
-        poor_performers = [s for s, stats in symbol_stats.items() 
+        poor_performers = [s for s, stats in symbol_stats.items()
                           if stats['total_trades'] >= 3 and stats['avg_pnl'] < -0.5]
         if poor_performers:
             recommendations.append({
                 "type": "symbol_filter",
-                "priority": "medium", 
+                "priority": "medium",
                 "message": f"Poor performing symbols detected: {', '.join(poor_performers[:3])}",
                 "action": "Consider removing these symbols from watchlist"
             })
-        
+
         # Duration recommendations
         long_trades = [t for t in trades if t.get('duration_minutes', 0) > 30]
         if len(long_trades) > len(trades) * 0.3:
@@ -577,7 +577,7 @@ class TradeAnalyzer:
                 "message": "Many trades are held longer than 30 minutes",
                 "action": "Consider tighter exit conditions or shorter max trade time"
             })
-        
+
         return recommendations
 
     def analyze_symbol_performance(self):
@@ -599,7 +599,7 @@ class TradeAnalyzer:
             stats['total_trades'] += 1
             stats['total_pnl'] += pnl
             stats['avg_duration'] += duration
-            
+
             if pnl > 0:
                 stats['wins'] += 1
             else:
@@ -650,33 +650,33 @@ def log_row(row):
             w.writerow(row)
 
 def read_csv_tail(path, n=RECENT_TRADES_LIMIT):
-    if not os.path.isfile(path): 
+    if not os.path.isfile(path):
         return []
-    
+
     try:
         trades = []
         with open(path, 'r', encoding='utf-8') as f:
             content = f.read().strip()
             if not content:
                 return []
-            
+
             # Split into lines and filter out empty lines
             lines = [line.strip() for line in content.split('\n') if line.strip()]
             if len(lines) < 2:  # Need at least header + 1 data row
                 return []
-            
+
             # Parse CSV manually to avoid DictReader issues
             header = lines[0].split(',')
-            
+
             for i, line in enumerate(lines[1:], 1):
                 try:
                     values = line.split(',')
                     if len(values) != len(header):
                         continue
-                    
+
                     # Create row dict
                     row = dict(zip(header, values))
-                    
+
                     # Clean and validate the row data
                     trade = {
                         'time': (row.get('time', '') or '').strip(),
@@ -688,16 +688,16 @@ def read_csv_tail(path, n=RECENT_TRADES_LIMIT):
                         'note': (row.get('note', '') or '').strip(),
                         'worker_id': (row.get('worker_id', '') or '').strip()
                     }
-                    
+
                     # Only require essential fields - allow empty pnl_pct for BUY orders
                     if trade['time'] and trade['symbol'] and trade['action'] and trade['price']:
                         trades.append(trade)
-                
+
                 except Exception:
                     continue
         # Return last n trades, newest first
         return trades[-n:][::-1] if trades else []
-        
+
     except Exception as e:
         print(f"[ERROR] Failed to read CSV {path}: {e}")
         return []
@@ -708,13 +708,13 @@ def build_client():
     key = os.getenv("BINANCE_API_KEY", "")
     sec = os.getenv("BINANCE_API_SECRET", "")
     testnet_mode = os.getenv("BINANCE_TESTNET", "true").lower()
-    
+
     print(f"[DEBUG] Environment check:")
     print(f"[DEBUG] - API Key present: {'Yes' if key else 'No'}")
     print(f"[DEBUG] - Secret present: {'Yes' if sec else 'No'}")
     print(f"[DEBUG] - Testnet mode: {testnet_mode}")
     print(f"[DEBUG] - Environment: {'DEPLOYMENT' if os.getenv('REPL_DEPLOYMENT') else 'DEVELOPMENT'}")
-    
+
     if not key or not sec:
         print("ERROR: Set BINANCE_API_KEY and BINANCE_API_SECRET"); sys.exit(1)
 
@@ -734,20 +734,20 @@ def get_symbol_filters(client, symbol):
         raise RuntimeError(f"{symbol} not tradable")
     tick = lot = 0.0; min_notional = 0.0
     for f in info["filters"]:
-        if f["filterType"] == "PRICE_FILTER": 
+        if f["filterType"] == "PRICE_FILTER":
             tick = float(f["tickSize"])
-        elif f["filterType"] == "LOT_SIZE":   
+        elif f["filterType"] == "LOT_SIZE":
             lot = float(f["stepSize"])
-        elif f["filterType"] == "MARKET_LOT_SIZE":   
+        elif f["filterType"] == "MARKET_LOT_SIZE":
             # Use MARKET_LOT_SIZE for market orders if available
             lot = float(f["stepSize"])
-        elif f["filterType"] in ("NOTIONAL", "MIN_NOTIONAL"):   
+        elif f["filterType"] in ("NOTIONAL", "MIN_NOTIONAL"):
             min_notional = float(f.get("minNotional", f.get("notional", 0.0)))
-    
+
     # Fallback if lot size is 0
     if lot == 0.0:
         lot = 0.00001  # Default small lot size
-        
+
     print(f"[FILTERS] {symbol}: tick={tick}, lot={lot}, min_notional={min_notional}")
     return tick, lot, min_notional
 
@@ -857,7 +857,7 @@ def make_policy():
         "min_day_vol": TUNABLE_PARAMS['min_day_volatility_pct'],
         "pattern": "bounce_strong"
     }
-    
+
     return policy
 
 def evaluate_buy_checks(client, symbol, cache, policy):
@@ -926,7 +926,7 @@ def evaluate_buy_checks(client, symbol, cache, policy):
 # ------------------ Orders ----------------------
 def market_buy_by_quote(client, symbol, quote_usdt):
     max_retries = 3
-    
+
     # Enhanced balance validation with retry
     for balance_check in range(3):
         try:
@@ -936,15 +936,15 @@ def market_buy_by_quote(client, symbol, quote_usdt):
                 if balance['asset'] == 'USDT':
                     usdt_balance = float(balance['free'])
                     break
-            
+
             # Add buffer for fees and other pending orders
             required_balance = float(quote_usdt) * 1.05  # 5% buffer
             if usdt_balance < required_balance:
                 raise RuntimeError(f"Insufficient USDT balance. Available: {usdt_balance:.2f}, Required: {required_balance:.2f} (including 5% buffer)")
-            
+
             print(f"[BUY] Balance check OK: {usdt_balance:.2f} USDT available")
             break
-            
+
         except Exception as balance_error:
             if "Insufficient" in str(balance_error):
                 raise balance_error
@@ -952,7 +952,7 @@ def market_buy_by_quote(client, symbol, quote_usdt):
                 print(f"[BUY] Warning - Could not verify balance after 3 attempts: {balance_error}")
                 break
             time.sleep(1)
-    
+
     for attempt in range(max_retries):
         try:
             price = get_price_cached(client, symbol)
@@ -969,10 +969,10 @@ def market_buy_by_quote(client, symbol, quote_usdt):
                 print(f"[BUY] Success using quoteOrderQty method")
             except Exception as quote_error:
                 print(f"[BUY] QuoteOrderQty failed for {symbol}, using quantity method: {quote_error}")
-                
+
                 # Enhanced quantity calculation with proper lot size handling
                 raw_qty = spend / price
-                
+
                 # Proper lot size calculation
                 if lot > 0:
                     # Use mathematical approach for lot size
@@ -980,7 +980,7 @@ def market_buy_by_quote(client, symbol, quote_usdt):
                     # Calculate how many lot sizes fit in raw_qty
                     lot_count = math.floor(raw_qty / lot)
                     qty = lot_count * lot
-                    
+
                     # Format to appropriate decimal places
                     if lot >= 1:
                         qty = round(qty, 0)
@@ -996,20 +996,20 @@ def market_buy_by_quote(client, symbol, quote_usdt):
                         qty = round(qty, 8)
                 else:
                     qty = round(raw_qty, 8)  # Default 8 decimals
-                
+
                 if qty <= 0:
                     raise RuntimeError(f"Quantity rounds to 0. Raw: {raw_qty:.8f}, Lot: {lot}, Calculated: {qty}")
-                
+
                 # Verify minimum notional
                 trade_value = price * qty
                 if trade_value < min_notional:
                     raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_notional:.2f}")
-                
+
                 print(f"[BUY] Using quantity: {qty} (from {raw_qty:.8f}, lot: {lot})")
                 order = client.create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
                 print(f"[BUY] Success using quantity method")
             break
-            
+
         except Exception as e:
             error_msg = str(e).lower()
             if "insufficient balance" in error_msg:
@@ -1022,12 +1022,12 @@ def market_buy_by_quote(client, symbol, quote_usdt):
                     continue
             elif "precision" in error_msg:
                 print(f"[WARN] Precision error on attempt {attempt + 1}: {e}")
-                
+
             if attempt == max_retries - 1:
                 raise RuntimeError(f"Failed to execute buy order for {symbol} after {max_retries} attempts: {e}")
             print(f"[WARN] Buy attempt {attempt + 1} failed for {symbol}: {e}")
             time.sleep(min(2 ** attempt, 3))
-    
+
     fills = order.get("fills", [])
     if fills:
         spent_total = sum(float(f["price"]) * float(f["qty"]) for f in fills)
@@ -1039,7 +1039,7 @@ def market_buy_by_quote(client, symbol, quote_usdt):
         qty = spend / price
         avg_price = price
         print(f"[BUY] Fallback calculation: {qty:.8f} {symbol.replace('USDT', '')} at {avg_price:.6f}")
-    
+
     return avg_price, qty
 
 def market_sell_qty(client, symbol, qty):
@@ -1050,42 +1050,58 @@ def market_sell_qty(client, symbol, qty):
             asset = symbol.replace('USDT', '')
             account = client.get_account()
             available_qty = 0.0
-            
+
             for balance in account['balances']:
                 if balance['asset'] == asset:
                     available_qty = float(balance['free'])
                     break
-            
+
             if available_qty <= 0:
                 raise RuntimeError(f"No {asset} balance available to sell")
-            
+
             # Use the EXACT available balance instead of requested qty to sell everything
             actual_qty = available_qty
-            
+
             # Get proper lot size with better filtering
             tick, lot, min_notional = get_symbol_filters(client, symbol)
-            
-            # Enhanced lot size calculation
+
+            # Enhanced lot size calculation with proper precision handling
             if lot > 0:
                 import math
-                # Use mathematical approach for lot size
-                lot_count = math.floor(actual_qty / lot)
-                actual_qty = lot_count * lot
-                
-                # Format to appropriate decimal places
+                import decimal
+
+                # Use Decimal for precise calculations
+                decimal.getcontext().prec = 28
+                d_qty = decimal.Decimal(str(actual_qty))
+                d_lot = decimal.Decimal(str(lot))
+
+                # Calculate how many complete lot sizes fit
+                lot_count = int(d_qty / d_lot)
+                actual_qty = float(lot_count * d_lot)
+
+                # Determine appropriate decimal places based on lot size
                 if lot >= 1:
-                    actual_qty = round(actual_qty, 0)
+                    decimal_places = 0
                 elif lot >= 0.1:
-                    actual_qty = round(actual_qty, 1)
+                    decimal_places = 1
                 elif lot >= 0.01:
-                    actual_qty = round(actual_qty, 2)
+                    decimal_places = 2
                 elif lot >= 0.001:
-                    actual_qty = round(actual_qty, 3)
+                    decimal_places = 3
                 elif lot >= 0.0001:
-                    actual_qty = round(actual_qty, 4)
+                    decimal_places = 4
+                elif lot >= 0.00001:
+                    decimal_places = 5
+                elif lot >= 0.000001:
+                    decimal_places = 6
+                elif lot >= 0.0000001:
+                    decimal_places = 7
                 else:
-                    actual_qty = round(actual_qty, 8)
-            
+                    decimal_places = 8
+
+                # Apply precise rounding
+                actual_qty = round(actual_qty, decimal_places)
+
             if actual_qty <= 0:
                 raise RuntimeError(f"Quantity rounds to 0 after lot size filter. Available: {available_qty:.8f}, Lot: {lot}")
 
@@ -1093,29 +1109,29 @@ def market_sell_qty(client, symbol, qty):
             price = get_price_cached(client, symbol)
             min_req = max(5.0, min_notional * 1.05)  # Reduced buffer for sells
             trade_value = price * actual_qty
-            
+
             if trade_value < min_req:
                 raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_req:.2f}")
 
             print(f"[SELL] Attempting to sell {actual_qty} {asset} (estimated value: {trade_value:.2f} USDT)")
             print(f"[FILTERS] {symbol}: tick={tick}, lot={lot}, min_notional={min_notional}")
-            
+
             order = client.create_order(symbol=symbol, side="SELL", type="MARKET", quantity=actual_qty)
             print(f"[SELL] Order executed successfully")
             break
-            
+
         except Exception as e:
             error_msg = str(e).lower()
             if "lot_size" in error_msg:
                 print(f"[WARN] LOT_SIZE error on sell attempt {attempt + 1}: {e}")
             elif "precision" in error_msg:
                 print(f"[WARN] Precision error on sell attempt {attempt + 1}: {e}")
-                
+
             if attempt == max_retries - 1:
                 raise RuntimeError(f"Failed to execute sell order for {symbol} after {max_retries} attempts: {e}")
             print(f"[WARN] Sell attempt {attempt + 1} failed for {symbol}: {e}")
             time.sleep(min(2 ** attempt, 3))
-    
+
     fills = order.get("fills", [])
     if fills:
         earned = sum(float(f["price"]) * float(f["qty"]) for f in fills)
@@ -1127,7 +1143,7 @@ def market_sell_qty(client, symbol, qty):
         avg_price = price
         qty = actual_qty
         print(f"[SELL] Fallback calculation: {qty:.8f} {asset} at {avg_price:.6f}")
-    
+
     return avg_price, qty
 
 # ------------------ Multi-Worker ----------------
@@ -1226,7 +1242,7 @@ class FastCycleBot:
             'total_sell_orders': 0,
             'total_profit_usd': 0.0
         }
-        
+
         # Clear any existing debug events for fresh start
         self._debug_events.clear()
         print("✓ Worker management initialized")
@@ -1377,17 +1393,17 @@ class FastCycleBot:
                 if balance['asset'] == 'USDT':
                     usdt_balance = float(balance['free'])
                     break
-            
+
             # Add buffer for fees and existing workers
             total_allocated = sum(worker.quote for worker in self._worker_state.values())
             required_balance = quote_amount + total_allocated
             buffer_needed = required_balance * 0.05  # 5% buffer for fees
-            
+
             if usdt_balance < (quote_amount + buffer_needed):
                 raise RuntimeError(f"Insufficient USDT balance. Available: {usdt_balance:.2f}, Required: {quote_amount:.2f} + {buffer_needed:.2f} buffer")
-                
+
             print(f"[Bot] Balance check: {usdt_balance:.2f} USDT available, {quote_amount:.2f} requested")
-            
+
         except Exception as e:
             if "Insufficient" in str(e):
                 raise e
@@ -1442,7 +1458,7 @@ class FastCycleBot:
 
     def _worker_loop(self, wid: int, stop_ev: threading.Event):
         st = self._worker_state[wid]; client = self._client
-        
+
         # Create randomized watchlist for this worker
         import random
         worker_watchlist = self.watchlist.copy()
@@ -1474,12 +1490,12 @@ class FastCycleBot:
                     print(f"[Worker-{wid}] Watchlist cycle completed")
 
                 symbol = worker_watchlist[scan_idx % len(worker_watchlist)]
-                
+
                 # Skip if already scanned in this cycle
                 if symbol in scanned_symbols:
                     scan_idx += 1
                     continue
-                    
+
                 scanned_symbols.add(symbol)
                 scan_idx += 1
 
@@ -1496,13 +1512,13 @@ class FastCycleBot:
                     policy = make_policy()
                     self._update_state(wid, status="scanning", symbol=symbol, note=f"Analyzing {symbol}...")
                     flags = evaluate_buy_checks(client, symbol, self._candles_cache, policy)
-                    
+
                     # Only log important events to reduce console noise
                     if flags["ok"]:
                         print(f"[Worker-{wid}] 🎯 BUY SIGNAL for {symbol} ({flags['reason']})")
                     elif flags.get("reason") in ["data_fetch_error"]:
                         print(f"[Worker-{wid}] ⚠️ Error on {symbol}: {flags['reason']}")
-                    
+
                     # Reduced frequency logging - only log every 10th scan for failed signals
                     elif scan_idx % 10 == 0 and not flags["ok"]:
                         env_type = "DEPLOY" if os.getenv('REPL_DEPLOYMENT') else "DEV"
@@ -1539,7 +1555,7 @@ class FastCycleBot:
                         # IN POSITION
                         self._update_state(wid, status="in_position", note=f"In trade {symbol}")
                         position_exit_reason = None
-                        
+
                         while position_exit_reason is None:
                             try:
                                 price = get_price_cached(client, symbol)
@@ -1609,7 +1625,7 @@ class FastCycleBot:
 
                         # Trade finished, clear context regardless of outcome
                         st.entry_price = None; st.qty = None; st.started = None; st.symbol = None
-                        
+
                         # If stop was requested, clean up and exit after position properly closed
                         if stop_ev.is_set():
                             print(f"[Worker-{wid}] Position closed naturally ({position_exit_reason}), cleaning up...")
@@ -1702,7 +1718,7 @@ class FastCycleBot:
             "workers": workers, "debug_enabled": self.debug_enabled,
             "tunable_params": {
                 'take_profit_pct': TUNABLE_PARAMS['take_profit_pct'],
-                'trail_arm_pct': TUNABLE_PARAMS['trail_arm_pct'], 
+                'trail_arm_pct': TUNABLE_PARAMS['trail_arm_pct'],
                 'trail_giveback_pct': TUNABLE_PARAMS['trail_giveback_pct'],
                 'stop_loss_pct': TUNABLE_PARAMS['stop_loss_pct'],
                 'min_day_volatility_pct': TUNABLE_PARAMS['min_day_volatility_pct'],
@@ -1768,7 +1784,7 @@ def api_trades():
     try:
         if not os.path.exists(LOG_FILE):
             return jsonify({"rows": [], "message": "No trade data file found"})
-        
+
         trades = read_csv_tail(LOG_FILE, RECENT_TRADES_LIMIT)
         return jsonify({"rows": trades})
     except Exception as e:
@@ -1850,7 +1866,7 @@ def api_analysis_refresh():
 def api_analysis_performance():
     try:
         bot_instance = get_bot_instance()
-        
+
         # Check if CSV file exists and has data
         if os.path.exists(LOG_FILE):
             with open(LOG_FILE, 'r') as f:
@@ -1858,11 +1874,11 @@ def api_analysis_performance():
                 print(f"[API] CSV file has {len(lines)} lines")
         else:
             print(f"[API] CSV file not found: {LOG_FILE}")
-        
+
         analysis = bot_instance.trade_analyzer.get_comprehensive_analysis()
-        
+
         print(f"[API] Analysis result - Total trades: {analysis.get('total_trades', 0)}")
-        
+
         # Ensure all required fields are present and properly formatted
         if 'error' not in analysis:
             # Make sure numeric fields are properly formatted
@@ -1871,7 +1887,7 @@ def api_analysis_performance():
                     analysis[key] = float(analysis[key])
                 else:
                     analysis[key] = 0.0
-            
+
             # Ensure risk_metrics exists
             if 'risk_metrics' not in analysis or not analysis['risk_metrics']:
                 analysis['risk_metrics'] = {
@@ -1881,7 +1897,7 @@ def api_analysis_performance():
                     "best_trade": 0.0,
                     "worst_trade": 0.0
                 }
-        
+
         return jsonify(analysis)
     except Exception as e:
         print(f"[API] Analysis performance ERROR: {e}")
@@ -1995,50 +2011,50 @@ def api_reconnect():
         global bot
         if bot is None:
             return jsonify({"error": "Bot not initialized"}), 400
-        
+
         print("[API] Reconnecting to Binance API...")
-        
+
         # Test current connection first
         try:
             test_response = bot._client.get_account()
             return jsonify({
-                "status": "already_connected", 
+                "status": "already_connected",
                 "message": "API connection is already working",
                 "balance": f"{get_net_usdt_value(bot._client):.2f} USDT"
             })
         except Exception as conn_error:
             print(f"[API] Current connection failed: {conn_error}")
-        
+
         # Reinitialize the client
         old_client = bot._client
         bot._client = build_client()
-        
+
         # Test new connection
         try:
             account_info = bot._client.get_account()
             new_balance = get_net_usdt_value(bot._client)
             bot.current_net_usdt = new_balance
-            
+
             print(f"[API] Successfully reconnected to Binance API")
             print(f"[API] New balance: {new_balance:.2f} USDT")
-            
+
             return jsonify({
                 "status": "reconnected",
                 "message": "Successfully reconnected to Binance API",
                 "balance": f"{new_balance:.2f} USDT",
                 "server_ip": get_server_ip()
             })
-            
+
         except Exception as new_conn_error:
             # Rollback to old client if new one fails
             bot._client = old_client
             print(f"[API] Reconnection failed, rolled back: {new_conn_error}")
-            
+
             return jsonify({
                 "error": f"Reconnection failed: {new_conn_error}",
                 "suggestion": "Make sure you've whitelisted the server IP in Binance"
             }), 400
-            
+
     except Exception as e:
         print(f"[API] Reconnect ERROR: {e}")
         return jsonify({"error": str(e)}), 500
@@ -2047,7 +2063,7 @@ def api_reconnect():
 def api_server_info():
     try:
         server_ip = get_server_ip()
-        
+
         # Parse the IP and hostname from the formatted string
         ip_part = server_ip.split(" (")[0] if " (" in server_ip else server_ip
         hostname_part = ""
@@ -2055,14 +2071,14 @@ def api_server_info():
             hostname_part = server_ip.split(" (hostname: ")[1].rstrip(")")
         elif " (detected)" in server_ip:
             hostname_part = "Auto-detected"
-        
+
         # Try to determine region based on environment
         region = "Unknown"
         if os.getenv('REPL_DEPLOYMENT'):
             region = "Replit Deployment (USA)"
         elif os.getenv('REPL_SLUG'):
             region = "Replit Development (USA)"
-        
+
         return jsonify({
             "ip": ip_part,
             "hostname": hostname_part,
@@ -2073,7 +2089,7 @@ def api_server_info():
         print(f"[API] Server info ERROR: {e}")
         return jsonify({
             "ip": "Unable to fetch",
-            "hostname": "Unknown", 
+            "hostname": "Unknown",
             "region": "Unknown",
             "environment": "Unknown",
             "error": str(e)
@@ -2089,7 +2105,7 @@ def get_server_ip():
             "https://icanhazip.com",
             "https://ident.me"
         ]
-        
+
         for service in services:
             try:
                 response = requests.get(service, timeout=10)
@@ -2101,11 +2117,11 @@ def get_server_ip():
                     return f"{external_ip} (external)"
             except Exception:
                 continue
-        
+
         # Fallback: Get internal IP with warning
         import socket
         hostname = socket.gethostname()
-        
+
         try:
             # Try socket method for internal IP
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -2114,17 +2130,17 @@ def get_server_ip():
             return f"{internal_ip} (⚠️ INTERNAL - Use external IP for Binance)"
         except Exception:
             return "Unable to determine IP address"
-        
+
     except Exception as e:
         return f"Error getting IP: {str(e)}"
 
 if __name__ == "__main__":
     print("=== STARTING TRADEPRO BOT ===")
-    
+
     # Output IP address
     server_ip = get_server_ip()
     print(f"🌐 Server IP Address: {server_ip}")
-    
+
     print("Initializing bot core...")
 
     try:
@@ -2141,7 +2157,7 @@ if __name__ == "__main__":
         # Try to find an available port
         port = int(os.getenv("PORT", "5000"))
         max_attempts = 5
-        
+
         for attempt in range(max_attempts):
             try:
                 print(f"Dashboard will be available at: http://0.0.0.0:{port}")
@@ -2159,7 +2175,7 @@ if __name__ == "__main__":
         print(f"CRITICAL ERROR: Failed to start Flask server or initialize bot: {e}")
         import traceback
         traceback.print_exc()
-        
+
         # Try to kill any existing processes on port 5000
         print("Attempting to free up port 5000...")
         try:
