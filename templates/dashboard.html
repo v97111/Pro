@@ -623,6 +623,28 @@
             background: rgba(255, 59, 48, 0.15);
             color: var(--danger);
         }
+
+        /* Specific Console Output Styles */
+        #console-output {
+            background: var(--card-light);
+            color: var(--text-primary); /* Default text color */
+            border: 1px solid var(--separator);
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 12px;
+            line-height: 1.4;
+            resize: vertical;
+            white-space: pre-wrap;
+            height: 200px; /* Set a default height */
+            overflow-y: auto; /* Enable scrolling */
+        }
+        #console-output.log { color: var(--text-primary); }
+        #console-output.error { color: var(--danger); }
+        #console-output.warn { color: var(--warning); }
+        #console-output.info { color: var(--primary); }
+
+
     </style>
 </head>
 <body>
@@ -795,7 +817,13 @@
             <div class="card-content">
                 <!-- Console Output -->
                 <div style="margin-bottom: 20px;">
-                    <h4 style="color: var(--text-primary); margin-bottom: 8px;">Console Output:</h4>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <h4 style="color: var(--text-primary);">Console Output:</h4>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn btn-secondary" onclick="copyConsoleOutput()">📋 Copy</button>
+                            <button class="btn btn-secondary" onclick="toggleAutoScroll()" id="autoscroll-btn">Auto-scroll: ON</button>
+                        </div>
+                    </div>
                     <textarea id="consoleOutput" readonly style="
                         width: 100%;
                         height: 200px;
@@ -875,48 +903,184 @@
     </div>
 
     <script>
-        let debugEnabled = false;
+        let autoRefresh = true;
+        let statusChart = null;
+        let autoScroll = true;
+        let consoleEventSource = null;
+
+        // Console functions
+        function loadConsole() {
+            fetch('/api/console?limit=500')
+                .then(response => response.json())
+                .then(data => {
+                    const consoleDiv = document.getElementById('consoleOutput');
+                    if (data.lines && data.lines.length > 0) {
+                        consoleDiv.value = data.lines.join('\n');
+                        if (autoScroll) {
+                            consoleDiv.scrollTop = consoleDiv.scrollHeight;
+                        }
+                    } else {
+                        consoleDiv.value = 'Console initialized - Output will appear here...';
+                    }
+                })
+                .catch(error => {
+                    console.error('Console load error:', error);
+                    document.getElementById('consoleOutput').value = `Error loading console: ${error.message}`;
+                });
+        }
+
+        function copyConsoleOutput() {
+            const consoleOutput = document.getElementById('consoleOutput').value;
+            const timestamp = new Date().toISOString();
+            const logData = [
+                `=== TRADEPRO CONSOLE OUTPUT ===`,
+                `Timestamp: ${timestamp}`,
+                `URL: ${window.location.href}`,
+                `=== CONSOLE LOGS ===`,
+                consoleOutput || 'No console output available'
+            ].join('\n');
+
+            navigator.clipboard.writeText(logData).then(() => {
+                // Visual feedback
+                const btn = document.querySelector('button[onclick="copyConsoleOutput()"]');
+                const originalText = btn.textContent;
+                btn.textContent = '✅ Copied!';
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                }, 2000);
+            }).catch(() => {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = logData;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                alert('✅ Console output copied to clipboard');
+            });
+        }
+
+        function startConsoleStream() {
+            if (consoleEventSource) {
+                consoleEventSource.close();
+            }
+
+            try {
+                consoleEventSource = new EventSource('/api/console/stream');
+                consoleEventSource.onmessage = function(event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        const consoleDiv = document.getElementById('consoleOutput');
+                        
+                        // Append new line to existing content
+                        if (consoleDiv.value) {
+                            consoleDiv.value += '\n' + data.line;
+                        } else {
+                            consoleDiv.value = data.line;
+                        }
+
+                        // Keep only last 500 lines to prevent memory issues
+                        const lines = consoleDiv.value.split('\n');
+                        if (lines.length > 500) {
+                            consoleDiv.value = lines.slice(-500).join('\n');
+                        }
+
+                        if (autoScroll) {
+                            consoleDiv.scrollTop = consoleDiv.scrollHeight;
+                        }
+                    } catch (error) {
+                        console.error('Console stream parse error:', error);
+                    }
+                };
+
+                consoleEventSource.onerror = function(event) {
+                    console.log('Console stream disconnected, will retry in 5s...');
+                    consoleEventSource.close();
+                    setTimeout(() => {
+                        if (autoRefresh) {
+                            startConsoleStream();
+                        }
+                    }, 5000);
+                };
+
+                consoleEventSource.onopen = function(event) {
+                    logHealth('Console stream connected');
+                };
+
+            } catch (error) {
+                console.error('Failed to start console stream:', error);
+                // Fallback to polling if EventSource fails
+                setTimeout(() => {
+                    if (autoRefresh) {
+                        loadConsole();
+                        setTimeout(startConsoleStream, 10000);
+                    }
+                }, 5000);
+            }
+        }
+
+        function clearLogs() {
+            consoleBuffer = [];
+            networkBuffer = [];
+            healthBuffer = [];
+            updateConsoleDisplay();
+            updateNetworkDisplay();
+            updateHealthDisplay();
+            fetch('/api/console/clear', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'cleared') {
+                        document.getElementById('consoleOutput').textContent = '';
+                    }
+                })
+                .catch(error => console.error('Console clear error:', error));
+        }
+
+        function toggleAutoScroll() {
+            autoScroll = !autoScroll;
+            const btn = document.getElementById('autoscroll-btn');
+            btn.textContent = `Auto-scroll: ${autoScroll ? 'ON' : 'OFF'}`;
+            btn.className = autoScroll ? 'btn btn-primary' : 'btn btn-secondary';
+            
+            if (autoScroll) {
+                const consoleDiv = document.getElementById('consoleOutput');
+                consoleDiv.scrollTop = consoleDiv.scrollHeight;
+            }
+            
+            logHealth(`Console auto-scroll: ${autoScroll ? 'ENABLED' : 'DISABLED'}`);
+        }
+
+        function toggleAutoRefresh() {
+            autoRefresh = !autoRefresh;
+            const btn = document.getElementById('autoRefreshBtn'); // Assuming a button with this ID exists or will be added
+            btn.textContent = `Auto-Refresh: ${autoRefresh ? 'ON' : 'OFF'}`;
+            btn.className = autoRefresh ? 'btn btn-primary' : 'btn btn-secondary';
+            // Logic to start/stop intervals would go here if they were managed globally
+        }
+
+        // Console and logging buffer management
         let consoleBuffer = [];
         let networkBuffer = [];
         let healthBuffer = [];
+        let debugEnabled = false;
         let allTrades = [];
-        let tradeScrollPosition = 0;
 
-        // Capture console logs
-        const originalConsole = {
-            log: console.log,
-            error: console.error,
-            warn: console.warn,
-            info: console.info
-        };
-
-        function logToBuffer(type, args) {
-            const timestamp = new Date().toISOString().slice(11, 23);
-            const message = `[${timestamp}] [${type.toUpperCase()}] ${Array.from(args).join(' ')}`;
-            consoleBuffer.push(message);
-            if (consoleBuffer.length > 100) consoleBuffer.shift();
-            updateConsoleDisplay();
+        function logHealth(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            const logLine = `[${timestamp}] ${message}`;
+            healthBuffer.push(logLine);
+            if (healthBuffer.length > 100) healthBuffer.shift();
+            updateHealthDisplay();
         }
 
-        console.log = function(...args) {
-            originalConsole.log.apply(console, args);
-            logToBuffer('log', args);
-        };
-
-        console.error = function(...args) {
-            originalConsole.error.apply(console, args);
-            logToBuffer('error', args);
-        };
-
-        console.warn = function(...args) {
-            originalConsole.warn.apply(console, args);
-            logToBuffer('warn', args);
-        };
-
-        console.info = function(...args) {
-            originalConsole.info.apply(console, args);
-            logToBuffer('info', args);
-        };
+        function logNetwork(method, url, status, error = null) {
+            const timestamp = new Date().toLocaleTimeString();
+            const errorMsg = error ? ` - ${error}` : '';
+            const logLine = `[${timestamp}] ${method} ${url} -> ${status}${errorMsg}`;
+            networkBuffer.push(logLine);
+            if (networkBuffer.length > 50) networkBuffer.shift();
+            updateNetworkDisplay();
+        }
 
         function updateConsoleDisplay() {
             const textarea = document.getElementById('consoleOutput');
@@ -928,72 +1092,48 @@
 
         function updateNetworkDisplay() {
             const textarea = document.getElementById('networkLogs');
-            if (textarea) {
-                textarea.value = networkBuffer.join('\n');
+            if (textarea && networkBuffer.length > 0) {
+                textarea.value = networkBuffer.slice(-30).join('\n');
                 textarea.scrollTop = textarea.scrollHeight;
             }
         }
 
         function updateHealthDisplay() {
             const textarea = document.getElementById('botHealth');
-            if (textarea) {
-                textarea.value = healthBuffer.join('\n');
+            if (textarea && healthBuffer.length > 0) {
+                textarea.value = healthBuffer.slice(-20).join('\n');
                 textarea.scrollTop = textarea.scrollHeight;
             }
         }
 
-        function logNetwork(method, url, status, error = null) {
-            const timestamp = new Date().toISOString().slice(11, 23);
-            const statusText = error ? `ERROR: ${error}` : `${status}`;
-            const message = `[${timestamp}] ${method} ${url} → ${statusText}`;
-            networkBuffer.push(message);
-            if (networkBuffer.length > 50) networkBuffer.shift();
-            updateNetworkDisplay();
-        }
-
-        function logHealth(message) {
-            const timestamp = new Date().toISOString().slice(11, 23);
-            healthBuffer.push(`[${timestamp}] ${message}`);
-            if (healthBuffer.length > 30) healthBuffer.shift();
-            updateHealthDisplay();
-        }
-
-        function clearLogs() {
-            consoleBuffer = [];
-            networkBuffer = [];
-            healthBuffer = [];
-            updateConsoleDisplay();
-            updateNetworkDisplay();
-            updateHealthDisplay();
-        }
-
         function copyAllLogs() {
             const allLogs = [
-                '=== CONSOLE OUTPUT ===',
-                consoleBuffer.join('\n'),
-                '\n=== NETWORK REQUESTS ===',
-                networkBuffer.join('\n'),
-                '\n=== BOT HEALTH ===',
-                healthBuffer.join('\n'),
-                '\n=== BROWSER INFO ===',
-                `User Agent: ${navigator.userAgent}`,
+                "=== CONSOLE OUTPUT ===",
+                document.getElementById('consoleOutput').value || 'No console output',
+                "\n=== NETWORK LOGS ===",
+                networkBuffer.join('\n') || 'No network logs',
+                "\n=== BOT HEALTH ===",
+                healthBuffer.join('\n') || 'No health logs',
+                "\n=== SYSTEM INFO ===",
+                `Timestamp: ${new Date().toISOString()}`,
                 `URL: ${window.location.href}`,
-                `Timestamp: ${new Date().toISOString()}`
+                `User Agent: ${navigator.userAgent}`
             ].join('\n');
 
             navigator.clipboard.writeText(allLogs).then(() => {
-                alert('All logs copied to clipboard!');
+                alert('✅ All logs copied to clipboard');
             }).catch(() => {
                 // Fallback for older browsers
-                const textarea = document.createElement('textarea');
-                textarea.value = allLogs;
-                document.body.appendChild(textarea);
-                textarea.select();
+                const textArea = document.createElement('textarea');
+                textArea.value = allLogs;
+                document.body.appendChild(textArea);
+                textArea.select();
                 document.execCommand('copy');
-                document.body.removeChild(textarea);
-                alert('All logs copied to clipboard!');
+                document.body.removeChild(textArea);
+                alert('✅ All logs copied to clipboard');
             });
         }
+
 
         // Confirmation dialogs
         function confirmStopCore() {
@@ -1005,37 +1145,37 @@
         async function reconnectAPI() {
             const btn = document.getElementById('reconnectBtn');
             const originalText = btn.textContent;
-            
+
             try {
                 btn.textContent = 'Reconnecting...';
                 btn.disabled = true;
-                
+
                 const response = await post('/api/reconnect-api');
                 const data = await response.json();
-                
+
                 if (data.status === 'reconnected' || data.status === 'already_connected') {
                     btn.textContent = '✓ Connected';
                     btn.style.background = 'var(--success)';
-                    
+
                     // Show server IP in console
                     if (data.server_ip) {
                         console.log(`🌐 Server IP: ${data.server_ip}`);
                         logHealth(`🌐 Server IP: ${data.server_ip}`);
                     }
-                    
+
                     // Show balance
                     if (data.balance) {
                         console.log(`💰 Balance: ${data.balance}`);
                         logHealth(`💰 Current balance: ${data.balance}`);
                     }
-                    
+
                     alert(`✅ ${data.message}\n💰 Balance: ${data.balance || 'Unknown'}\n🌐 IP: ${data.server_ip || 'Unknown'}`);
                 } else {
                     btn.textContent = '✗ Failed';
                     btn.style.background = 'var(--danger)';
                     alert(`❌ Reconnection failed: ${data.error || 'Unknown error'}\n\n💡 ${data.suggestion || 'Please check your API keys and IP whitelist'}`);
                 }
-                
+
             } catch (error) {
                 btn.textContent = '✗ Failed';
                 btn.style.background = 'var(--danger)';
@@ -1077,38 +1217,38 @@
         async function startPosition() {
             const amount = parseFloat(document.getElementById('tradeAmount').value || '20');
             const startBtn = document.querySelector('button[onclick="startPosition()"]');
-            
+
             if (!startBtn) {
                 alert('❌ Start button not found');
                 return;
             }
-            
+
             const originalText = startBtn.textContent;
-            
+
             try {
                 startBtn.textContent = 'Starting...';
                 startBtn.disabled = true;
-                
+
                 const response = await post('/api/add-worker', { quote: amount });
-                
+
                 if (!response.ok) {
                     const errorData = await response.json();
                     throw new Error(errorData.error || 'Unknown server error');
                 }
-                
+
                 const result = await response.json();
-                
+
                 await refreshData();
-                
+
                 startBtn.textContent = originalText;
                 startBtn.disabled = false;
-                
+
             } catch (error) {
                 startBtn.textContent = originalText;
                 startBtn.disabled = false;
-                
+
                 console.error('Start position error:', error);
-                
+
                 // Show specific error message for insufficient balance
                 if (error.message && error.message.includes('Insufficient balance')) {
                     alert(`❌ ${error.message}\n\nPlease reduce the amount or add more funds to your account.`);
@@ -1213,14 +1353,14 @@
                 const isScanning = worker.status === 'scanning' || worker.status === 'buying' || worker.status === 'selling';
                 const isClosing = worker.status === 'closing';
 
-                const pnlValue = worker.unreal_pct !== null 
+                const pnlValue = worker.unreal_pct !== null
                     ? `${worker.unreal_pct >= 0 ? '+' : ''}${worker.unreal_pct.toFixed(2)}%`
                     : '-';
-                const pnlClass = worker.unreal_pct !== null 
+                const pnlClass = worker.unreal_pct !== null
                     ? (worker.unreal_pct >= 0 ? 'stat-positive' : 'stat-negative')
                     : '';
 
-                const heldTime = worker.started 
+                const heldTime = worker.started
                     ? Math.floor((Date.now() - new Date(worker.started)) / 60000) + 'm'
                     : '-';
 
@@ -1265,7 +1405,7 @@
                                 Position Closing...
                             </div>
                         ` : worker.status !== 'stopped' ? `
-                            <button class="btn btn-danger" onclick="confirmStopPosition(${worker.id})" 
+                            <button class="btn btn-danger" onclick="confirmStopPosition(${worker.id})"
                                     style="width: 100%; margin-top: 8px;">
                                 Stop Position
                             </button>
@@ -1305,7 +1445,7 @@
                 const tradeDate = trade.time ? new Date(trade.time) : null;
                 const dateStr = tradeDate ? tradeDate.toLocaleDateString('en-GB', {
                     year: '2-digit',
-                    month: '2-digit', 
+                    month: '2-digit',
                     day: '2-digit'
                 }) : '';
                 const timeStr = tradeDate ? tradeDate.toLocaleTimeString() : '';
@@ -1448,7 +1588,7 @@
                     tradeProfitEl.className = `stat-value ${status.trade_profit_usd >= 0 ? 'stat-positive' : 'stat-negative'}`;
                 }
 
-                document.getElementById('watchlist').textContent = 
+                document.getElementById('watchlist').textContent =
                     `${status.watchlist_count || 0}/${status.watchlist_total || 0}`;
                 document.getElementById('totalBuys').textContent = status.total_buys || 0;
                 document.getElementById('totalSells').textContent = status.total_sells || 0;
@@ -1562,76 +1702,43 @@
             }
         });
 
-        // Initialize with better error handling
-        let initRetries = 0;
-        async function initialize() {
-            try {
-                logHealth(`Initialization attempt ${initRetries + 1}/5`);
-                console.log('🚀 Starting TradePro initialization...');
+        // Initialize when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            logHealth('Dashboard initializing...');
+            loadConsole();
+            startConsoleStream();
 
-                logHealth('Starting bot core...');
-                const startResponse = await post('/api/start-core');
-                console.log('✓ Bot core start requested');
+            // Load initial data
+            refreshData(true); // Force parameters reload on initial load
+            refreshTrades();   // Load trade history
 
-                // Wait longer for server to fully initialize
-                logHealth('Waiting for bot core to initialize...');
-                await new Promise(resolve => setTimeout(resolve, 3000));
-
-                logHealth('Loading initial data...');
-                await refreshData(true); // Load parameters on initial page load
-                console.log('✓ Portfolio data loaded');
-
-                // Force immediate trade history refresh
-                await refreshTrades();
-                console.log('✓ Trade history loaded');
-
-                // Force another refresh after a short delay to catch any new trades
-                setTimeout(async () => {
-                    await refreshTrades();
-                    console.log('✓ Trade history double-checked');
+            // Start auto-refresh intervals
+            if (autoRefresh) {
+                setInterval(() => {
+                    refreshData(); // Regular data refresh without forcing param reload
                 }, 2000);
 
-                logHealth('✅ Bot initialized successfully! Starting real-time updates...');
-                console.log('🔄 Starting refresh intervals...');
+                setInterval(() => {
+                    refreshTrades();
+                }, 10000);
 
-                // Start refresh intervals with better spacing
-                const portfolioInterval = setInterval(refreshData, 2000);    // Every 2s
-                const tradesInterval = setInterval(refreshTrades, 10000);    // Every 10s  
-                const debugInterval = setInterval(refreshDebug, 3000);       // Every 3s when enabled
-
-                // Store intervals for cleanup if needed
-                window.refreshIntervals = { portfolioInterval, tradesInterval, debugInterval };
-
-            } catch (e) {
-                initRetries++;
-                const errorMsg = `Initialization attempt ${initRetries} failed: ${e.message}`;
-                console.error('❌', errorMsg);
-                logHealth(errorMsg);
-
-                if (initRetries < 5) {
-                    const retryDelay = Math.min(2000 * initRetries, 10000); // Progressive backoff
-                    console.log(`⏳ Retrying in ${retryDelay/1000}s...`);
-                    logHealth(`Retrying initialization in ${retryDelay/1000} seconds...`);
-                    setTimeout(initialize, retryDelay);
-                } else {
-                    const finalError = '💀 FAILED: Could not initialize after 5 attempts';
-                    console.error(finalError);
-                    logHealth(finalError);
-
-                    // Show error in UI
-                    document.getElementById('balance').textContent = 'Connection Failed';
-                    document.getElementById('balance').style.color = 'var(--danger)';
-                }
+                setInterval(() => {
+                    refreshDebug();
+                }, 5000);
             }
-        }
 
-        // Log initial browser state
-        logHealth('Dashboard loaded');
-        logHealth(`Browser: ${navigator.userAgent}`);
-        logHealth(`URL: ${window.location.href}`);
+            logHealth('Dashboard initialization complete');
+        });
 
-        // Start initialization
-        initialize();
+
+        // Initialize after DOM loads with proper logging
+        window.addEventListener('load', () => {
+            logHealth('Dashboard fully loaded');
+            logHealth(`Browser: ${navigator.userAgent.split(' ')[0]}`);
+            logHealth(`Connection: ${window.location.protocol}//${window.location.host}`);
+        });
+
+
     </script>
 </body>
 </html>
