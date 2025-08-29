@@ -1110,10 +1110,18 @@ def market_sell_qty(client, symbol, qty):
             # Enhanced lot size calculation with proper precision handling
             if lot > 0:
                 import math
+                from decimal import Decimal, ROUND_DOWN
+
+                # Use Decimal for precise calculations to avoid floating point errors
+                actual_qty_decimal = Decimal(str(actual_qty))
+                lot_decimal = Decimal(str(lot))
 
                 # Calculate how many complete lot sizes fit in available quantity
-                lot_count = math.floor(actual_qty / lot)
-                actual_qty = lot_count * lot
+                lot_count = int(actual_qty_decimal / lot_decimal)
+                actual_qty_decimal = lot_count * lot_decimal
+
+                # Convert back to float with proper precision
+                actual_qty = float(actual_qty_decimal)
 
                 # Determine decimal places based on lot size for proper formatting
                 if lot >= 1:
@@ -1135,15 +1143,10 @@ def market_sell_qty(client, symbol, qty):
                 else:
                     decimal_places = 8
 
-                # Apply precise rounding to match lot size exactly
-                actual_qty = round(actual_qty, decimal_places)
-                
-                # Verify the quantity is still a valid multiple of lot size
-                remainder = actual_qty % lot
-                if remainder > lot * 0.01:  # Allow tiny precision errors
-                    # Round down to nearest valid lot size
-                    actual_qty = math.floor(actual_qty / lot) * lot
-                    actual_qty = round(actual_qty, decimal_places)
+                # Final precise rounding using Decimal to ensure exact lot size multiple
+                actual_qty = float(Decimal(str(actual_qty)).quantize(
+                    Decimal(str(lot)), rounding=ROUND_DOWN
+                ))
 
             if actual_qty <= 0:
                 raise RuntimeError(f"Quantity rounds to 0 after lot size filter. Available: {available_qty:.8f}, Lot: {lot}")
