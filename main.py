@@ -969,14 +969,14 @@ def evaluate_buy_checks(client, symbol, cache, policy):
 def market_buy_by_quote(client, symbol, quote_usdt):
     max_retries = 3
 
-    # Enhanced balance validation with retry
+    # Enhanced balance validation with retry - check only free USDT
     for balance_check in range(3):
         try:
             account = client.get_account()
             usdt_balance = 0.0
             for balance in account['balances']:
                 if balance['asset'] == 'USDT':
-                    usdt_balance = float(balance['free'])
+                    usdt_balance = float(balance['free'])  # Only free USDT
                     break
 
             # Add buffer for fees and other pending orders
@@ -984,7 +984,7 @@ def market_buy_by_quote(client, symbol, quote_usdt):
             if usdt_balance < required_balance:
                 raise RuntimeError(f"Insufficient USDT balance. Available: {usdt_balance:.2f}, Required: {required_balance:.2f} (including 5% buffer)")
 
-            print(f"[BUY] Balance check OK: {usdt_balance:.2f} USDT available")
+            print(f"[BUY] Balance check OK: {usdt_balance:.2f} free USDT available")
             break
 
         except Exception as balance_error:
@@ -1012,32 +1012,42 @@ def market_buy_by_quote(client, symbol, quote_usdt):
             except Exception as quote_error:
                 print(f"[BUY] QuoteOrderQty failed for {symbol}, using quantity method: {quote_error}")
 
-                # Enhanced quantity calculation with proper lot size handling
+                # INTEGER-BASED LOT CALCULATION (same as sell method)
                 raw_qty = spend / price
 
-                # Proper lot size calculation
                 if lot > 0:
-                    # Use mathematical approach for lot size
-                    import math
-                    # Calculate how many lot sizes fit in raw_qty
-                    lot_count = math.floor(raw_qty / lot)
-                    qty = lot_count * lot
+                    # Calculate lot units using integer division to avoid floating-point errors
+                    lot_units = int(raw_qty / lot)
 
-                    # Format to appropriate decimal places
+                    # Calculate exact quantity by multiplying back
+                    qty = lot_units * lot
+
+                    # Determine precision from lot size for proper formatting
                     if lot >= 1:
-                        qty = round(qty, 0)
+                        precision = 0
                     elif lot >= 0.1:
-                        qty = round(qty, 1)
+                        precision = 1
                     elif lot >= 0.01:
-                        qty = round(qty, 2)
+                        precision = 2
                     elif lot >= 0.001:
-                        qty = round(qty, 3)
+                        precision = 3
                     elif lot >= 0.0001:
-                        qty = round(qty, 4)
+                        precision = 4
+                    elif lot >= 0.00001:
+                        precision = 5
                     else:
-                        qty = round(qty, 8)
+                        precision = 8
+
+                    print(f"[BUY_INTEGER] Raw qty: {raw_qty:.8f}, Lot: {lot}")
+                    print(f"[BUY_INTEGER] Lot units: {lot_units}, Final qty: {qty:.8f}")
+
+                    # Verification - should be exactly zero remainder
+                    remainder_check = qty % lot
+                    print(f"[BUY_VERIFY] Remainder check: {remainder_check:.20f}")
+
                 else:
-                    qty = round(raw_qty, 8)  # Default 8 decimals
+                    qty = raw_qty
+                    precision = 8  # Default precision
 
                 if qty <= 0:
                     raise RuntimeError(f"Quantity rounds to 0. Raw: {raw_qty:.8f}, Lot: {lot}, Calculated: {qty}")
@@ -1047,9 +1057,17 @@ def market_buy_by_quote(client, symbol, quote_usdt):
                 if trade_value < min_notional:
                     raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_notional:.2f}")
 
-                print(f"[BUY] Using quantity: {qty} (from {raw_qty:.8f}, lot: {lot})")
-                order = client.create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
-                print(f"[BUY] Success using quantity method")
+                # Format quantity as string with proper precision (never send as float)
+                if precision == 0:
+                    qty_str = str(int(qty))
+                else:
+                    qty_str = f"{qty:.{precision}f}".rstrip('0').rstrip('.')
+                    if not qty_str or qty_str == '':
+                        qty_str = f"{qty:.{precision}f}"
+
+                print(f"[BUY] Using quantity string: {qty_str} (value: {trade_value:.2f} USDT)")
+                order = client.create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty_str)
+                print(f"[BUY] Success using integer-based quantity method")
             break
 
         except Exception as e:
@@ -1086,11 +1104,9 @@ def market_buy_by_quote(client, symbol, quote_usdt):
 
 def market_sell_qty(client, symbol, qty):
     """
-    Sell exact quantity using precise Decimal arithmetic to avoid floating-point errors.
-    This implements Binance's lot size compliance requirements with mathematical precision.
+    Sell available quantity using integer-based lot unit calculation to avoid LOT_SIZE filter failures.
+    This implements the correct solution from Binance forum post about floating-point precision errors.
     """
-    from decimal import Decimal, ROUND_DOWN
-    
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -1109,40 +1125,42 @@ def market_sell_qty(client, symbol, qty):
 
             # Get symbol filters
             tick, lot, min_notional = get_symbol_filters(client, symbol)
-            
-            # PRECISE DECIMAL CALCULATION METHOD
+
+            # INTEGER-BASED LOT UNIT CALCULATION (forum solution)
             if lot > 0:
-                # Use Decimal for exact arithmetic
-                available_decimal = Decimal(str(available_qty))
-                lot_decimal = Decimal(str(lot))
-                
-                # Calculate exact number of lot units we can sell
-                lot_units = available_decimal // lot_decimal
-                
-                # Calculate exact sellable quantity
-                sellable_decimal = lot_units * lot_decimal
-                
-                # Convert back to float for API call
-                actual_qty = float(sellable_decimal)
-                
-                # Determine precision from lot size
-                lot_str = f"{lot:.20f}".rstrip('0').rstrip('.')
-                if '.' in lot_str:
-                    precision = len(lot_str.split('.')[1])
-                else:
+                # Calculate lot units using integer division to avoid floating-point errors
+                lot_units = int(available_qty / lot)
+
+                # Calculate exact sellable quantity by multiplying back
+                actual_qty = lot_units * lot
+
+                # Determine precision from lot size for proper formatting
+                if lot >= 1:
                     precision = 0
-                
-                print(f"[DECIMAL_METHOD] Available: {available_qty:.8f}, Lot: {lot}")
-                print(f"[DECIMAL_METHOD] Lot units: {lot_units}, Sellable qty: {actual_qty:.8f}")
-                
-                # Final verification - should be exactly zero remainder
+                elif lot >= 0.1:
+                    precision = 1
+                elif lot >= 0.01:
+                    precision = 2
+                elif lot >= 0.001:
+                    precision = 3
+                elif lot >= 0.0001:
+                    precision = 4
+                elif lot >= 0.00001:
+                    precision = 5
+                else:
+                    precision = 8
+
+                print(f"[INTEGER_METHOD] Available: {available_qty:.8f}, Lot: {lot}")
+                print(f"[INTEGER_METHOD] Lot units: {lot_units}, Sellable qty: {actual_qty:.8f}")
+
+                # Verification - should be exactly zero remainder
                 remainder_check = actual_qty % lot
-                print(f"[DECIMAL_VERIFY] Remainder check: {remainder_check:.20f}")
-                
+                print(f"[INTEGER_VERIFY] Remainder check: {remainder_check:.20f}")
+
             else:
                 actual_qty = available_qty
                 precision = 8  # Default precision
-            
+
             if actual_qty <= 0:
                 raise RuntimeError(f"Quantity rounds to 0 after lot size adjustment. Available: {available_qty:.8f}, Lot: {lot}")
 
@@ -1150,66 +1168,67 @@ def market_sell_qty(client, symbol, qty):
             price = get_price_cached(client, symbol)
             trade_value = price * actual_qty
             min_req = max(5.0, min_notional * 1.02)  # Small buffer for price movement
-            
+
             if trade_value < min_req:
                 raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_req:.2f}. Cannot proceed with sale.")
 
-            # Format quantity for API call using exact decimal representation
-            if precision > 0:
-                qty_str = f"{actual_qty:.{precision}f}"
-            else:
+            # Format quantity as string with proper precision (never send as float)
+            if precision == 0:
                 qty_str = str(int(actual_qty))
-            
+            else:
+                qty_str = f"{actual_qty:.{precision}f}".rstrip('0').rstrip('.')
+                if not qty_str or qty_str == '':
+                    qty_str = f"{actual_qty:.{precision}f}"
+
             print(f"[SELL] Executing order: {qty_str} {asset} (value: {trade_value:.2f} USDT)")
 
-            # Execute the order using the precisely calculated quantity
+            # Execute the order using the precisely calculated quantity string
             order = client.create_order(
-                symbol=symbol, 
-                side="SELL", 
-                type="MARKET", 
+                symbol=symbol,
+                side="SELL",
+                type="MARKET",
                 quantity=qty_str
             )
-            
+
             print(f"[SELL] Order executed successfully with quantity: {qty_str}")
             break
 
         except Exception as e:
             error_msg = str(e).lower()
-            
+
             # Handle specific error types
             if "lot_size" in error_msg and "code=-1013" in str(e):
                 print(f"[ERROR] LOT_SIZE filter failure on attempt {attempt + 1}: {e}")
-                
-                # On final attempt, try emergency method
+
+                # On final attempt, try with even more conservative rounding
                 if attempt == max_retries - 1:
-                    print(f"[EMERGENCY] Using Decimal arithmetic emergency method...")
+                    print(f"[FINAL_ATTEMPT] Using most conservative lot calculation...")
                     try:
-                        from decimal import Decimal
-                        # Emergency: Use pure decimal calculation
-                        available_decimal = Decimal(str(available_qty))
-                        lot_decimal = Decimal(str(lot))
-                        emergency_units = int(available_decimal / lot_decimal)
-                        
-                        if emergency_units > 0:
-                            emergency_qty = float(emergency_units * lot_decimal)
-                            emergency_str = f"{emergency_qty:.{precision}f}" if precision > 0 else str(int(emergency_qty))
-                            
-                            print(f"[EMERGENCY] Final attempt with {emergency_str} {asset}")
-                            
+                        # Most conservative: Reduce lot units by 1 to ensure compliance
+                        conservative_units = max(0, int(available_qty / lot) - 1)
+
+                        if conservative_units > 0:
+                            conservative_qty = conservative_units * lot
+                            conservative_str = f"{conservative_qty:.{precision}f}".rstrip('0').rstrip('.')
+                            if not conservative_str:
+                                conservative_str = f"{conservative_qty:.{precision}f}"
+
+                            print(f"[FINAL_ATTEMPT] Conservative attempt with {conservative_str} {asset}")
+
                             order = client.create_order(
-                                symbol=symbol, 
-                                side="SELL", 
-                                type="MARKET", 
-                                quantity=emergency_str
+                                symbol=symbol,
+                                side="SELL",
+                                type="MARKET",
+                                quantity=conservative_str
                             )
-                            print(f"[EMERGENCY] Emergency sell successful with {emergency_str}")
+                            print(f"[FINAL_ATTEMPT] Conservative sell successful with {conservative_str}")
                             break
                         else:
                             raise RuntimeError(f"Cannot sell any valid quantity. Available: {available_qty:.8f}, Lot: {lot}")
-                    except Exception as emergency_error:
-                        print(f"[EMERGENCY] Emergency method failed: {emergency_error}")
+                    except Exception as conservative_error:
+                        print(f"[FINAL_ATTEMPT] Conservative method failed: {conservative_error}")
                         raise e
-            
+
             elif "insufficient" in error_msg:
                 print(f"[ERROR] Insufficient balance error: {e}")
                 break  # Don't retry on balance issues
@@ -1218,7 +1237,7 @@ def market_sell_qty(client, symbol, qty):
 
             if attempt == max_retries - 1:
                 raise RuntimeError(f"Failed to execute sell order for {symbol} after {max_retries} attempts: {e}")
-            
+
             time.sleep(min(2 ** attempt, 3))  # Exponential backoff
 
     # Process the order response
@@ -1227,15 +1246,15 @@ def market_sell_qty(client, symbol, qty):
         earned = sum(float(f["price"]) * float(f["qty"]) for f in fills)
         sold = sum(float(f["qty"]) for f in fills)
         avg_price = earned / sold if sold > 0 else price
-        qty = sold
-        print(f"[SELL] Success: Sold {qty:.8f} {asset} for {earned:.2f} USDT (avg price: {avg_price:.6f})")
+        final_qty = sold
+        print(f"[SELL] Success: Sold {final_qty:.8f} {asset} for {earned:.2f} USDT (avg price: {avg_price:.6f})")
     else:
         # Fallback calculation if no fills data
         avg_price = price
-        qty = actual_qty
-        print(f"[SELL] Fallback calculation: {qty:.8f} {asset} at {avg_price:.6f}")
+        final_qty = actual_qty
+        print(f"[SELL] Fallback calculation: {final_qty:.8f} {asset} at {avg_price:.6f}")
 
-    return avg_price, qty
+    return avg_price, final_qty
 
 # ------------------ Multi-Worker ----------------
 class WorkerState:
@@ -1489,24 +1508,26 @@ class FastCycleBot:
             if not self._running:
                 raise RuntimeError("Failed to start bot core.")
 
-        # Enhanced balance validation
+        # Enhanced balance validation - check only FREE USDT, not total portfolio value
         try:
             account = self._client.get_account()
             usdt_balance = 0.0
             for balance in account['balances']:
                 if balance['asset'] == 'USDT':
-                    usdt_balance = float(balance['free'])
+                    usdt_balance = float(balance['free'])  # Only free USDT, not locked
                     break
 
-            # Add buffer for fees and existing workers
+            # Calculate already allocated USDT from existing workers
             total_allocated = sum(worker.quote for worker in self._worker_state.values())
-            required_balance = quote_amount + total_allocated
-            buffer_needed = required_balance * 0.05  # 5% buffer for fees
 
-            if usdt_balance < (quote_amount + buffer_needed):
-                raise RuntimeError(f"Insufficient USDT balance. Available: {usdt_balance:.2f}, Required: {quote_amount:.2f} + {buffer_needed:.2f} buffer")
+            # Check if we have enough free USDT for this new worker
+            available_for_new_worker = usdt_balance - total_allocated
+            buffer_needed = quote_amount * 0.05  # 5% buffer for fees
 
-            print(f"[Bot] Balance check: {usdt_balance:.2f} USDT available, {quote_amount:.2f} requested")
+            if available_for_new_worker < (quote_amount + buffer_needed):
+                raise RuntimeError(f"Insufficient free USDT balance. Available: {usdt_balance:.2f} USDT, Already allocated: {total_allocated:.2f} USDT, Free for new worker: {available_for_new_worker:.2f} USDT, Required: {quote_amount:.2f} + {buffer_needed:.2f} buffer")
+
+            print(f"[Bot] Balance check: {usdt_balance:.2f} free USDT available, {total_allocated:.2f} already allocated, {quote_amount:.2f} requested for new worker")
 
         except Exception as e:
             if "Insufficient" in str(e):
@@ -1519,8 +1540,19 @@ class FastCycleBot:
             if len(self._workers) >= self._max_workers:
                 raise RuntimeError(f"Maximum workers ({self._max_workers}) reached. Stop some workers first.")
 
+            # Generate unique worker ID with time-based suffix to prevent race conditions
             wid = 1
-            while wid in self._workers: wid += 1
+            while wid in self._workers or wid in self._worker_state: 
+                wid += 1
+            
+            # Additional check: wait if a worker with this ID was recently stopped
+            max_wait_attempts = 10
+            for attempt in range(max_wait_attempts):
+                if wid not in self._workers and wid not in self._worker_state and wid not in self._stop_flags:
+                    break
+                print(f"[Bot] Worker ID {wid} still cleaning up, waiting... (attempt {attempt + 1})")
+                time.sleep(0.2)
+                wid += 1  # Try next ID if current one is still being cleaned up
             state = WorkerState(wid, float(quote_amount))
             self._worker_state[wid] = state
             stop_ev = threading.Event(); self._stop_flags[wid] = stop_ev
@@ -1547,11 +1579,21 @@ class FastCycleBot:
         else:
             # Signal stop and remove card data structures immediately if not in position
             ev.set()
-            with self._lock:
-                self._workers.pop(wid, None)
-                self._stop_flags.pop(wid, None)
-                self._worker_state.pop(wid, None)
-            print(f"[Bot] Worker {wid} stopped and removed.")
+            # Mark for cleanup to prevent immediate reuse
+            self._update_state(wid, status="stopping", note="Cleaning up...")
+            
+            # Clean up in a separate thread to avoid blocking and ensure proper cleanup
+            def cleanup_worker():
+                time.sleep(0.5)  # Small delay to ensure worker loop sees the stop signal
+                with self._lock:
+                    self._workers.pop(wid, None)
+                    self._stop_flags.pop(wid, None)
+                    self._worker_state.pop(wid, None)
+                print(f"[Bot] Worker {wid} cleaned up successfully.")
+            
+            cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
+            cleanup_thread.start()
+            print(f"[Bot] Worker {wid} stop signal sent, cleanup in progress.")
 
 
     def _update_state(self, wid: int, **kwargs):
@@ -1573,8 +1615,13 @@ class FastCycleBot:
         print(f"[Worker-{wid}] Started scanning with ${st.quote}")
 
         while not stop_ev.is_set():
-            if self._worker_state.get(wid, WorkerState(wid, st.quote)).status not in ["scanning", "buying", "selling", "in_position", "error", "cooldown"]:
-                print(f"[Worker-{wid}] Exiting loop due to unexpected status: {self._worker_state.get(wid).status}")
+            current_state = self._worker_state.get(wid)
+            if not current_state:
+                print(f"[Worker-{wid}] State removed, exiting loop")
+                break
+            
+            if current_state.status not in ["scanning", "buying", "selling", "in_position", "error", "cooldown", "stopping"]:
+                print(f"[Worker-{wid}] Exiting loop due to unexpected status: {current_state.status}")
                 break
 
             try:
@@ -1688,6 +1735,7 @@ class FastCycleBot:
                                 self._last_sell_time[symbol] = now_utc(); self._update_state(wid, last_pnl=pnl)
                                 self._performance_metrics['total_sell_orders'] += 1
                                 self._performance_metrics['total_profit_usd'] += profit_usd
+                                print(f"[METRICS] Cumulative trade profit: ${self._performance_metrics['total_profit_usd']:.2f}")
                                 position_exit_reason = "take_profit"
                                 break
 
@@ -1708,6 +1756,7 @@ class FastCycleBot:
                                     self._last_sell_time[symbol] = now_utc(); self._update_state(wid, last_pnl=pnl)
                                     self._performance_metrics['total_sell_orders'] += 1
                                     self._performance_metrics['total_profit_usd'] += profit_usd
+                                    print(f"[METRICS] Cumulative trade profit: ${self._performance_metrics['total_profit_usd']:.2f}")
                                     position_exit_reason = "trailing_stop"
                                     break
 
@@ -1722,6 +1771,7 @@ class FastCycleBot:
                                 self._last_sell_time[symbol] = now_utc(); self._update_state(wid, last_pnl=pnl)
                                 self._performance_metrics['total_sell_orders'] += 1
                                 self._performance_metrics['total_profit_usd'] += profit_usd
+                                print(f"[METRICS] Cumulative trade profit: ${self._performance_metrics['total_profit_usd']:.2f}")
                                 position_exit_reason = "stop_loss"
                                 break
 
