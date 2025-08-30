@@ -1589,11 +1589,13 @@
                 }
 
                 // Update trade profit
-                const tradeProfitEl = document.getElementById('tradeProfit');
-                if (status.trade_profit_usd !== null) {
-                    const sign = status.trade_profit_usd >= 0 ? '+' : '';
-                    tradeProfitEl.textContent = `${sign}$${Math.round(status.trade_profit_usd)}`;
-                    tradeProfitEl.className = `stat-value ${status.trade_profit_usd >= 0 ? 'stat-positive' : 'stat-negative'}`;
+                const tradeProfitElement = document.getElementById('tradeProfit');
+                if (status.trade_profit_usd !== undefined && status.trade_profit_usd !== null) {
+                    tradeProfitElement.textContent = `$${parseFloat(status.trade_profit_usd).toFixed(2)}`;
+                    tradeProfitElement.className = 'stat-value ' + (status.trade_profit_usd >= 0 ? 'positive' : 'negative');
+                } else {
+                    tradeProfitElement.textContent = '$0.00';
+                    tradeProfitElement.className = 'stat-value';
                 }
 
                 document.getElementById('watchlist').textContent =
