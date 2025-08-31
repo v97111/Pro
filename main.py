@@ -30,6 +30,10 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import io
 from contextlib import redirect_stdout, redirect_stderr
+from decimal import Decimal, ROUND_DOWN, getcontext
+
+# Set high precision for Decimal calculations
+getcontext().prec = 28
 
 # ---- Concurrency / caches ----
 LOG_LOCK = threading.Lock()
@@ -180,7 +184,18 @@ WATCHLIST: List[str] = [
     "ETCUSDT","FLMUSDT","FXSUSDT","GRTUSDT","HOTUSDT","ICXUSDT","IOSTUSDT","IOTAUSDT","KLAYUSDT","KNCUSDT",
     "MASKUSDT","MKRUSDT","MTLUSDT","NKNUSDT","OGNUSDT","OMGUSDT","PHAUSDT","PYRUSDT","REIUSDT","RENUSDT",
     "SKLUSDT","SPELLUSDT","STMXUSDT","STORJUSDT","TLMUSDT","UMAUSDT","UNIUSDT","VETUSDT","XLMUSDT","XTZUSDT",
-    "YFIUSDT","ZRXUSDT"
+    "YFIUSDT","ZRXUSDT",
+    # Additional 100 high-potential coins with strong daily movement potential
+    "WIFUSDT","JUPUSDT","BOMEUSDT","WLDUSDT","NOTUSDT","FLOKIUSDT","BONKUSDT","1000SATSUSDT","ORDIUSDT","RAYUSDT",
+    "PENDLEUSDT","ETHFIUSDT","ENAUSDT","WUSDT","AIUSDT","ALTUSDT","TNSR USDT","OMNIUSDT","SAGA USDT","TAOUSDT",
+    "ARKMUSDT","PIXELUSDT","STRKUSDT","ACEUSDT","NFPUSDT","AIUSDT","XAIUSDT","MANTAUSDT","PYTHUSDT","DYMUSDT",
+    "PORTALUSDT","PONDUSDT","BRETTUSDT","TURBOUSDT","MEUSDT","REZUSDT","BBUSDT","NOTUSDT","IOUSDT","ZKUSDT",
+    "LISTAUSDT","ZROUSDT","GUSDT","BANANAUSDT","RENDERUSDT","TAOUSDT","OMNIUSDT","WIFUSDT","JUPUSDT","BOMEUSDT",
+    "SEIUSDT","TIAUSDT","STXUSDT","ARKMUSDT","BEAMUSDT","PIVXUSDT","VIBEUSDT","CAKEUSDT","PUNDIXUSDT","TLMUSDT",
+    "JASMYUSDT","DARUSDT","UNFIUSDT","RADUSDT","TRUUSDT","TWTUSDT","DEXEUSDT","POLYXUSDT","MDTUSDT","STPTUSDT",
+    "GASUSDT","POWRUSDT","SLPUSDT","FISUSDT","REEFUSDT","CLVUSDT","YFIIUSDT","EASYUSDT","AUDIOUSDT","CTKUSDT",
+    "BCHUSDT","SUSHIUSDT","SNXUSDT","BALUSDT","ZENUSDT","SKLUSDT","RUNEUSDT","SRMUSDT","LPTUSDT","ALPHAUSDT",
+    "DEGOUSDT","CVPUSDT","EPXUSDT","LOKAUSDT","OOKIUSDT","PROSUSDT","VOXELUSDT","HIGHUSDT","CVXUSDT","STGUSDT"
 ]
 
 # ------------------ Config ------------------
@@ -207,13 +222,15 @@ TUNABLE_PARAMS = {
     'min_day_volatility_pct': MIN_DAY_VOLATILITY_PCT,
     'cooldown_minutes': COOLDOWN_MINUTES,
     'max_trade_minutes': MAX_TRADE_MINUTES,
-    'ema_relax': 99.0,  # Percentage of EMA50
-    'vol_mult': 0.85    # Volume multiplier
+    'ema_relax': 99.0,  # EMA strictness as percentage of EMA50
+    'vol_mult': 0.85,   # Volume multiplier
+    'reversal_threshold_pct': 0.2,  # Reversal threshold for TP opportunity mode
+    'buying_pattern': 1  # Add missing buying pattern parameter
 }
 
 # Loop timing
-POLL_SECONDS_IDLE   = 2
-POLL_SECONDS_ACTIVE = 2
+POLL_SECONDS_IDLE   = 1    # 1 second when not in position
+POLL_SECONDS_ACTIVE = 1    # 1 second for price checking in position
 
 # Logging / debug
 LOG_FILE             = os.getenv("LOG_FILE", "fast_cycle_trades.csv")
@@ -398,7 +415,6 @@ class TradeAnalyzer:
                     for i, (key, buy) in enumerate(list(pending_buys.items())[:5]):
                         print(f"  {i+1}. {key}: {buy['symbol']} W{buy['worker_id']} @ {buy['price']}")
 
-                # Show sample of orders if no trades found
                 if len(trades) == 0 and len(all_orders) > 0:
                     print(f"[TradeAnalyzer] Sample orders from CSV:")
                     for i, order in enumerate(all_orders[:10]):
@@ -774,7 +790,7 @@ def get_symbol_filters(client, symbol):
     info = client.get_symbol_info(symbol)
     if not info or info.get("status") != "TRADING":
         raise RuntimeError(f"{symbol} not tradable")
-    tick = lot = 0.0; min_notional = 0.0
+    tick, lot, min_notional = 0.0, 0.0, 0.0
     for f in info["filters"]:
         if f["filterType"] == "PRICE_FILTER":
             tick = float(f["tickSize"])
@@ -859,7 +875,7 @@ def get_price_cached(client, symbol: str) -> float:
 
     # Try WebSocket first
     if _WS_FEED:
-        price = _WS_FEED.get_price(symbol)
+        price = _WS_feed.get_price(symbol)
         if price:
             return price
 
@@ -969,7 +985,7 @@ def evaluate_buy_checks(client, symbol, cache, policy):
 def market_buy_by_quote(client, symbol, quote_usdt):
     max_retries = 3
 
-    # Enhanced balance validation with retry - check only free USDT
+    # Balance validation - check only free USDT (fees are deducted from received amount)
     for balance_check in range(3):
         try:
             account = client.get_account()
@@ -979,10 +995,9 @@ def market_buy_by_quote(client, symbol, quote_usdt):
                     usdt_balance = float(balance['free'])  # Only free USDT
                     break
 
-            # Add buffer for fees and other pending orders
-            required_balance = float(quote_usdt) * 1.05  # 5% buffer
-            if usdt_balance < required_balance:
-                raise RuntimeError(f"Insufficient USDT balance. Available: {usdt_balance:.2f}, Required: {required_balance:.2f} (including 5% buffer)")
+            # Direct comparison - no buffer needed as fees come from received amount
+            if usdt_balance < float(quote_usdt):
+                raise RuntimeError(f"Insufficient USDT balance. Available: {usdt_balance:.2f}, Required: {quote_usdt}")
 
             print(f"[BUY] Balance check OK: {usdt_balance:.2f} free USDT available")
             break
@@ -999,7 +1014,7 @@ def market_buy_by_quote(client, symbol, quote_usdt):
         try:
             price = get_price_cached(client, symbol)
             tick, lot, min_notional = get_symbol_filters(client, symbol)
-            min_req = max(10.0, min_notional * 1.1)  # Add 10% buffer
+            min_req = max(10.0, min_notional)  # No buffer needed
             spend = max(float(quote_usdt), min_req)
 
             print(f"[BUY] Attempting to buy {symbol} with {spend:.2f} USDT at ~{price:.6f}")
@@ -1088,6 +1103,7 @@ def market_buy_by_quote(client, symbol, quote_usdt):
             print(f"[WARN] Buy attempt {attempt + 1} failed for {symbol}: {e}")
             time.sleep(min(2 ** attempt, 3))
 
+    # Process the order response
     fills = order.get("fills", [])
     if fills:
         spent_total = sum(float(f["price"]) * float(f["qty"]) for f in fills)
@@ -1104,35 +1120,50 @@ def market_buy_by_quote(client, symbol, quote_usdt):
 
 def market_sell_qty(client, symbol, qty):
     """
-    Sell available quantity using integer-based lot unit calculation to avoid LOT_SIZE filter failures.
-    This implements the correct solution from Binance forum post about floating-point precision errors.
+    Sell available quantity using Decimal-based precise lot unit calculation to eliminate floating-point errors.
+    This ensures exact compliance with Binance LOT_SIZE filters by using high-precision decimal arithmetic.
     """
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # Get exact available balance
+            # Use the worker's tracked quantity instead of account balance to avoid conflicts
+            # when multiple workers are trading the same asset
+            available_qty = qty
+
+            # Verify we have some balance (safety check)
             asset = symbol.replace('USDT', '')
             account = client.get_account()
-            available_qty = 0.0
+            account_balance = 0.0
 
             for balance in account['balances']:
                 if balance['asset'] == asset:
-                    available_qty = float(balance['free'])
+                    account_balance = float(balance['free'])
                     break
 
-            if available_qty <= 0:
+            if account_balance <= 0:
                 raise RuntimeError(f"No {asset} balance available to sell")
+
+            # Use the minimum of tracked quantity and account balance for safety
+            available_qty = min(available_qty, account_balance)
+
+            if available_qty <= 0:
+                raise RuntimeError(f"No {asset} quantity available to sell")
 
             # Get symbol filters
             tick, lot, min_notional = get_symbol_filters(client, symbol)
 
-            # INTEGER-BASED LOT UNIT CALCULATION (forum solution)
+            # DECIMAL-BASED LOT UNIT CALCULATION (eliminates floating-point errors)
             if lot > 0:
-                # Calculate lot units using integer division to avoid floating-point errors
-                lot_units = int(available_qty / lot)
+                # Convert to Decimal for precise arithmetic
+                available_decimal = Decimal(str(available_qty))
+                lot_decimal = Decimal(str(lot))
 
-                # Calculate exact sellable quantity by multiplying back
-                actual_qty = lot_units * lot
+                # Calculate lot units using Decimal division and floor
+                lot_units = int(available_decimal / lot_decimal)
+
+                # Calculate exact sellable quantity by multiplying back with Decimal
+                actual_qty_decimal = Decimal(lot_units) * lot_decimal
+                actual_qty = float(actual_qty_decimal)
 
                 # Determine precision from lot size for proper formatting
                 if lot >= 1:
@@ -1145,17 +1176,19 @@ def market_sell_qty(client, symbol, qty):
                     precision = 3
                 elif lot >= 0.0001:
                     precision = 4
-                elif lot >= 0.00001:
-                    precision = 5
+                elif lot >= 0.000001:
+                    precision = 6
+                elif lot >= 0.0000001:
+                    precision = 7
                 else:
                     precision = 8
 
-                print(f"[INTEGER_METHOD] Available: {available_qty:.8f}, Lot: {lot}")
-                print(f"[INTEGER_METHOD] Lot units: {lot_units}, Sellable qty: {actual_qty:.8f}")
+                print(f"[DECIMAL_METHOD] Available: {available_qty:.8f}, Lot: {lot}")
+                print(f"[DECIMAL_METHOD] Lot units: {lot_units}, Sellable qty: {actual_qty:.8f}")
 
-                # Verification - should be exactly zero remainder
-                remainder_check = actual_qty % lot
-                print(f"[INTEGER_VERIFY] Remainder check: {remainder_check:.20f}")
+                # Verification - should be exactly zero remainder with Decimal arithmetic
+                remainder_decimal = actual_qty_decimal % lot_decimal
+                print(f"[DECIMAL_VERIFY] Remainder check: {float(remainder_decimal):.20f}")
 
             else:
                 actual_qty = available_qty
@@ -1167,17 +1200,26 @@ def market_sell_qty(client, symbol, qty):
             # Check minimum notional value
             price = get_price_cached(client, symbol)
             trade_value = price * actual_qty
-            min_req = max(5.0, min_notional * 1.02)  # Small buffer for price movement
 
-            if trade_value < min_req:
-                raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_req:.2f}. Cannot proceed with sale.")
+            if trade_value < min_notional:
+                raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_notional:.2f}. Cannot proceed with sale.")
 
-            # Format quantity as string with proper precision (never send as float)
-            if precision == 0:
-                qty_str = str(int(actual_qty))
+            # Format quantity using Decimal to ensure exact precision
+            if lot > 0:
+                # Use Decimal formatting to avoid any floating-point representation issues
+                qty_decimal = Decimal(lot_units) * Decimal(str(lot))
+                if precision == 0:
+                    qty_str = str(int(qty_decimal))
+                else:
+                    # Quantize to exact precision to remove trailing zeros correctly
+                    quantize_exp = Decimal('0.1') ** precision
+                    qty_formatted = qty_decimal.quantize(quantize_exp, rounding=ROUND_DOWN)
+                    qty_str = f"{qty_formatted:.{precision}f}".rstrip('0').rstrip('.')
+                    if not qty_str or qty_str == '':
+                        qty_str = f"{qty_formatted:.{precision}f}"
             else:
                 qty_str = f"{actual_qty:.{precision}f}".rstrip('0').rstrip('.')
-                if not qty_str or qty_str == '':
+                if not qty_str:
                     qty_str = f"{actual_qty:.{precision}f}"
 
             print(f"[SELL] Executing order: {qty_str} {asset} (value: {trade_value:.2f} USDT)")
@@ -1200,20 +1242,27 @@ def market_sell_qty(client, symbol, qty):
             if "lot_size" in error_msg and "code=-1013" in str(e):
                 print(f"[ERROR] LOT_SIZE filter failure on attempt {attempt + 1}: {e}")
 
-                # On final attempt, try with even more conservative rounding
+                # On final attempt, try with ultra-conservative rounding using Decimal
                 if attempt == max_retries - 1:
-                    print(f"[FINAL_ATTEMPT] Using most conservative lot calculation...")
+                    print(f"[FINAL_ATTEMPT] Using ultra-conservative Decimal calculation...")
                     try:
-                        # Most conservative: Reduce lot units by 1 to ensure compliance
-                        conservative_units = max(0, int(available_qty / lot) - 1)
+                        # Ultra-conservative: Reduce lot units by 1 and use Decimal precision
+                        conservative_units = max(0, int(Decimal(str(available_qty)) / Decimal(str(lot))) - 1)
 
                         if conservative_units > 0:
-                            conservative_qty = conservative_units * lot
-                            conservative_str = f"{conservative_qty:.{precision}f}".rstrip('0').rstrip('.')
-                            if not conservative_str:
-                                conservative_str = f"{conservative_qty:.{precision}f}"
+                            conservative_decimal = Decimal(conservative_units) * Decimal(str(lot))
+                            conservative_qty = float(conservative_decimal)
 
-                            print(f"[FINAL_ATTEMPT] Conservative attempt with {conservative_str} {asset}")
+                            if precision == 0:
+                                conservative_str = str(int(conservative_decimal))
+                            else:
+                                quantize_exp = Decimal('0.1') ** precision
+                                formatted_decimal = conservative_decimal.quantize(quantize_exp, rounding=ROUND_DOWN)
+                                conservative_str = f"{formatted_decimal:.{precision}f}".rstrip('0').rstrip('.')
+                                if not conservative_str:
+                                    conservative_str = f"{formatted_decimal:.{precision}f}"
+
+                            print(f"[FINAL_ATTEMPT] Ultra-conservative attempt with {conservative_str} {asset}")
 
                             order = client.create_order(
                                 symbol=symbol,
@@ -1221,12 +1270,12 @@ def market_sell_qty(client, symbol, qty):
                                 type="MARKET",
                                 quantity=conservative_str
                             )
-                            print(f"[FINAL_ATTEMPT] Conservative sell successful with {conservative_str}")
+                            print(f"[FINAL_ATTEMPT] Ultra-conservative sell successful with {conservative_str}")
                             break
                         else:
                             raise RuntimeError(f"Cannot sell any valid quantity. Available: {available_qty:.8f}, Lot: {lot}")
                     except Exception as conservative_error:
-                        print(f"[FINAL_ATTEMPT] Conservative method failed: {conservative_error}")
+                        print(f"[FINAL_ATTEMPT] Ultra-conservative method failed: {conservative_error}")
                         raise e
 
             elif "insufficient" in error_msg:
@@ -1481,7 +1530,7 @@ class FastCycleBot:
         if symbol not in self._last_sell_time:
             return True
 
-        cooldown_end = self._last_sell_time[symbol] + timedelta(minutes=COOLDOWN_MINUTES)
+        cooldown_end = self._last_sell_time[symbol] + timedelta(minutes=TUNABLE_PARAMS['cooldown_minutes'])
         return now_utc() >= cooldown_end
 
     def _debug_push(self, symbol, wid, flags):
@@ -1508,7 +1557,7 @@ class FastCycleBot:
             if not self._running:
                 raise RuntimeError("Failed to start bot core.")
 
-        # Enhanced balance validation - check only FREE USDT, not total portfolio value
+        # Balance validation - check only FREE USDT (fees are deducted from received amount)
         try:
             account = self._client.get_account()
             usdt_balance = 0.0
@@ -1517,17 +1566,13 @@ class FastCycleBot:
                     usdt_balance = float(balance['free'])  # Only free USDT, not locked
                     break
 
-            # Calculate already allocated USDT from existing workers
+            # Direct check - no buffer needed since fees come from received amount
+            if usdt_balance < quote_amount:
+                raise RuntimeError(f"Insufficient free USDT balance. Available: {usdt_balance:.2f} USDT, Required: {quote_amount:.2f} USDT")
+
+            # For logging purposes, calculate theoretical allocation
             total_allocated = sum(worker.quote for worker in self._worker_state.values())
-
-            # Check if we have enough free USDT for this new worker
-            available_for_new_worker = usdt_balance - total_allocated
-            buffer_needed = quote_amount * 0.05  # 5% buffer for fees
-
-            if available_for_new_worker < (quote_amount + buffer_needed):
-                raise RuntimeError(f"Insufficient free USDT balance. Available: {usdt_balance:.2f} USDT, Already allocated: {total_allocated:.2f} USDT, Free for new worker: {available_for_new_worker:.2f} USDT, Required: {quote_amount:.2f} + {buffer_needed:.2f} buffer")
-
-            print(f"[Bot] Balance check: {usdt_balance:.2f} free USDT available, {total_allocated:.2f} already allocated, {quote_amount:.2f} requested for new worker")
+            print(f"[Bot] Balance check: {usdt_balance:.2f} free USDT available, {total_allocated:.2f} theoretically allocated, {quote_amount:.2f} requested for new worker")
 
         except Exception as e:
             if "Insufficient" in str(e):
@@ -1542,9 +1587,9 @@ class FastCycleBot:
 
             # Generate unique worker ID with time-based suffix to prevent race conditions
             wid = 1
-            while wid in self._workers or wid in self._worker_state: 
+            while wid in self._workers or wid in self._worker_state:
                 wid += 1
-            
+
             # Additional check: wait if a worker with this ID was recently stopped
             max_wait_attempts = 10
             for attempt in range(max_wait_attempts):
@@ -1570,18 +1615,19 @@ class FastCycleBot:
             return
 
         # If in position, show closing status and wait for natural exit
-        if st.status == "in_position" and st.symbol and st.qty and st.entry_price:
+        if st.status in ["in_position", "closing"] and st.symbol and st.qty and st.entry_price:
             print(f"[Bot] Worker {wid} in position, setting closing status...")
             self._update_state(wid, status="closing", note=f"Closing position on {st.symbol}...")
-            # Signal stop but keep worker alive until position closes
+            # Signal stop but keep worker alive until position closes naturally
             ev.set()
             print(f"[Bot] Worker {wid} will close position naturally and then stop.")
+
         else:
             # Signal stop and remove card data structures immediately if not in position
             ev.set()
             # Mark for cleanup to prevent immediate reuse
             self._update_state(wid, status="stopping", note="Cleaning up...")
-            
+
             # Clean up in a separate thread to avoid blocking and ensure proper cleanup
             def cleanup_worker():
                 time.sleep(0.5)  # Small delay to ensure worker loop sees the stop signal
@@ -1590,7 +1636,7 @@ class FastCycleBot:
                     self._stop_flags.pop(wid, None)
                     self._worker_state.pop(wid, None)
                 print(f"[Bot] Worker {wid} cleaned up successfully.")
-            
+
             cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
             cleanup_thread.start()
             print(f"[Bot] Worker {wid} stop signal sent, cleanup in progress.")
@@ -1604,81 +1650,75 @@ class FastCycleBot:
 
     def _worker_loop(self, wid: int, stop_ev: threading.Event):
         st = self._worker_state[wid]; client = self._client
-
-        # Create randomized watchlist for this worker
         import random
-        worker_watchlist = self.watchlist.copy()
-        random.shuffle(worker_watchlist)
-        scan_idx = 0
-        scanned_symbols = set()  # Track symbols already scanned in current cycle
 
-        print(f"[Worker-{wid}] Started scanning with ${st.quote}")
+        print(f"[Worker-{wid}] Started with ${st.quote}")
+
+        def get_randomized_watchlist():
+            """Get a new randomized watchlist excluding cooldown symbols"""
+            available_symbols = []
+            for symbol in self.watchlist:
+                if self._eligible_symbol(symbol):
+                    available_symbols.append(symbol)
+            random.shuffle(available_symbols)
+            return available_symbols
 
         while not stop_ev.is_set():
             current_state = self._worker_state.get(wid)
             if not current_state:
                 print(f"[Worker-{wid}] State removed, exiting loop")
                 break
-            
-            if current_state.status not in ["scanning", "buying", "selling", "in_position", "error", "cooldown", "stopping"]:
-                print(f"[Worker-{wid}] Exiting loop due to unexpected status: {current_state.status}")
-                break
 
-            try:
-                # Get symbol to analyze
-                if not worker_watchlist:
-                    print(f"[Worker-{wid}] Watchlist empty, sleeping...")
-                    time.sleep(POLL_SECONDS_IDLE * 2)
+            # Get fresh randomized watchlist for scanning
+            worker_watchlist = get_randomized_watchlist()
+            if not worker_watchlist:
+                print(f"[Worker-{wid}] No eligible symbols, waiting...")
+                time.sleep(5)
+                continue
+
+            print(f"[Worker-{wid}] Starting scan cycle with {len(worker_watchlist)} eligible symbols")
+
+            found_buy_signal = False
+
+            # Scan through the randomized list
+            for symbol in worker_watchlist:
+                # Check if worker should stop (if scanning, stop immediately)
+                if stop_ev.is_set():
+                    print(f"[Worker-{wid}] Stop requested during scanning, exiting...")
+                    with self._lock:
+                        self._workers.pop(wid, None)
+                        self._stop_flags.pop(wid, None)
+                        self._worker_state.pop(wid, None)
+                    return
+
+                # Check if symbol is still eligible (might have been traded recently)
+                if not self._eligible_symbol(symbol):
                     continue
 
-                # Reset cycle if we've scanned all symbols
-                if len(scanned_symbols) >= len(worker_watchlist):
-                    scanned_symbols.clear()
-                    random.shuffle(worker_watchlist)  # Re-shuffle for next cycle
-                    scan_idx = 0
-                    # Reduced logging frequency
-                if scan_idx % 50 == 0:  # Only log every 50 cycles
-                    print(f"[Worker-{wid}] Watchlist cycle completed")
-
-                symbol = worker_watchlist[scan_idx % len(worker_watchlist)]
-
-                # Skip if already scanned in this cycle
-                if symbol in scanned_symbols:
-                    scan_idx += 1
-                    continue
-
-                scanned_symbols.add(symbol)
-                scan_idx += 1
-
-                # Atomic symbol reservation check
+                # Try to reserve this symbol for scanning
+                symbol_reserved = False
                 with self._lock:
-                    if not self._eligible_symbol(symbol) or symbol in self._active_symbols:
-                        # If symbol is taken or on cooldown, try next one quickly
-                        time.sleep(0.05)
-                        continue
-                    # Reserve symbol immediately to prevent race conditions
-                    self._active_symbols.add(symbol)
+                    if symbol not in self._active_symbols:
+                        self._active_symbols.add(symbol)
+                        symbol_reserved = True
+
+                if not symbol_reserved:
+                    continue  # Skip if another worker is already using this symbol
 
                 try:
+                    # Update status to show which symbol we're scanning
+                    self._update_state(wid, status="scanning", symbol=symbol, note=f"Scanning {symbol}")
+
+                    # Evaluate buy conditions
                     policy = make_policy()
-                    self._update_state(wid, status="scanning", symbol=symbol, note=f"Analyzing {symbol}...")
                     flags = evaluate_buy_checks(client, symbol, self._candles_cache, policy)
 
-                    # Only log important events to reduce console noise
                     if flags["ok"]:
-                        print(f"[Worker-{wid}] 🎯 BUY SIGNAL for {symbol} ({flags['reason']})")
-                    elif flags.get("reason") in ["data_fetch_error"]:
-                        print(f"[Worker-{wid}] ⚠️ Error on {symbol}: {flags['reason']}")
+                        print(f"[Worker-{wid}] 🎯 BUY SIGNAL for {symbol}")
+                        found_buy_signal = True
 
-                    # Reduced frequency logging - only log every 10th scan for failed signals
-                    elif scan_idx % 10 == 0 and not flags["ok"]:
-                        env_type = "DEPLOY" if os.getenv('REPL_DEPLOYMENT') else "DEV"
-                        print(f"[{env_type}] W{wid} Sample: {symbol} - {flags['reason']}")
-
-                    if flags["ok"]:
-                        # Keep existing buy logic
-                        # BUY
-                        self._update_state(wid, status="buying", symbol=symbol, note=f"BUY signal ({flags['reason']})")
+                        # Execute buy order
+                        self._update_state(wid, status="buying", symbol=symbol, note=f"Buying {symbol}")
                         try:
                             entry, qty = market_buy_by_quote(client, symbol, st.quote)
                             start = now_utc()
@@ -1690,135 +1730,139 @@ class FastCycleBot:
                             self._update_state(wid, status="error", note=f"Buy failed: {buy_error}")
                             with self._lock:
                                 self._active_symbols.discard(symbol)
-                            continue # Try next symbol
+                            break  # Exit scanning loop to get new watchlist
 
-                        # store trade context for UI
+                        # Store trade context
                         st.symbol = symbol
                         st.entry_price = entry
                         st.qty = qty
                         st.started = start
 
-                        hard_tp  = entry * (1 + TUNABLE_PARAMS['take_profit_pct'] / 100.0)
-                        trail_arm= entry * (1 + TUNABLE_PARAMS['trail_arm_pct'] / 100.0)
-                        stop_loss= entry * (1 - TUNABLE_PARAMS['stop_loss_pct'] / 100.0)
-                        peak = entry; trailing = False
+                        # Calculate exit levels
+                        hard_tp = entry * (1 + TUNABLE_PARAMS['take_profit_pct'] / 100.0)
+                        trail_arm = entry * (1 + TUNABLE_PARAMS['trail_arm_pct'] / 100.0)
+                        peak = entry
+                        trailing = False
 
-                        # IN POSITION
-                        self._update_state(wid, status="in_position", note=f"In trade {symbol}")
+                        # Enter position monitoring
+                        self._update_state(wid, status="in_position", note=f"In position {symbol}")
                         position_exit_reason = None
 
+                        # Position monitoring loop
                         while position_exit_reason is None:
                             try:
                                 price = get_price_cached(client, symbol)
                                 ts = now_utc()
-                                if price > peak: peak = price
+                                if price > peak:
+                                    peak = price
                             except Exception as price_error:
                                 print(f"[Worker-{wid}] Price fetch error for {symbol}: {price_error}")
-                                self._update_state(wid, status="error", note=f"Price fetch failed: {price_error}")
                                 time.sleep(2)
                                 continue
 
-                            # Check if worker was requested to stop
+                            # Check if worker stop requested while in position
                             if stop_ev.is_set():
                                 self._update_state(wid, status="closing", note=f"Closing {symbol} on stop request...")
-                                # Continue monitoring until natural exit conditions are met
-                                # Don't break here - let it hit TP/SL/Trail naturally
 
-                            # Hard take-profit first (guarantee >= ~1% net)
+                            # Immediate take-profit (simplified logic)
                             if price >= hard_tp and not trailing:
-                                self._update_state(wid, status="selling", note=f"Hard TP on {symbol}")
+                                self._update_state(wid, status="selling", note=f"Take profit hit")
                                 exitp, sold = market_sell_qty(client, symbol, qty)
                                 pnl = (exitp/entry - 1)*100.0
                                 profit_usd = (exitp - entry) * sold
-                                log_row([ts.isoformat(), symbol, "SELL_TP_HARD", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"Worker {wid} hard-tp", wid])
+                                log_row([ts.isoformat(), symbol, "SELL_TP", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"Worker {wid} take-profit", wid])
                                 print(f"[SELL] W{wid} {symbol} TP @ {exitp:.6f} | P&L: {pnl:+.2f}%")
-                                self._last_sell_time[symbol] = now_utc(); self._update_state(wid, last_pnl=pnl)
+                                self._last_sell_time[symbol] = now_utc()
+                                self._update_state(wid, last_pnl=pnl)
                                 self._performance_metrics['total_sell_orders'] += 1
                                 self._performance_metrics['total_profit_usd'] += profit_usd
-                                print(f"[METRICS] Cumulative trade profit: ${self._performance_metrics['total_profit_usd']:.2f}")
                                 position_exit_reason = "take_profit"
                                 break
 
-                            # Arm trailing at stronger profit
-                            if not trailing and price >= trail_arm:
-                                trailing = True; self._update_state(wid, note=f"Trailing armed on {symbol}")
-
-                            # Trailing exit
-                            if trailing:
-                                floor = peak * (1 - TUNABLE_PARAMS['trail_giveback_pct'] / 100.0)
-                                if price <= floor:
-                                    self._update_state(wid, status="selling", note=f"Trailing exit on {symbol}")
-                                    exitp, sold = market_sell_qty(client, symbol, qty)
-                                    pnl = (exitp/entry - 1)*100.0
-                                    profit_usd = (exitp - entry) * sold
-                                    log_row([ts.isoformat(), symbol, "SELL_TR", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"Worker {wid} trailing", wid])
-                                    print(f"[SELL] W{wid} {symbol} TRAIL @ {exitp:.6f} | P&L: {pnl:+.2f}%")
-                                    self._last_sell_time[symbol] = now_utc(); self._update_state(wid, last_pnl=pnl)
-                                    self._performance_metrics['total_sell_orders'] += 1
-                                    self._performance_metrics['total_profit_usd'] += profit_usd
-                                    print(f"[METRICS] Cumulative trade profit: ${self._performance_metrics['total_profit_usd']:.2f}")
-                                    position_exit_reason = "trailing_stop"
-                                    break
+                            # Trail arming
+                            elif not trailing and price >= trail_arm:
+                                trailing = True
+                                self._update_state(wid, note=f"Trailing armed")
 
                             # Stop-loss
-                            if price <= stop_loss:
-                                self._update_state(wid, status="selling", note=f"Stop-loss on {symbol}")
+                            stop_loss_threshold = entry * (1.0 - TUNABLE_PARAMS['stop_loss_pct'] / 100.0)
+                            if price <= stop_loss_threshold:
+                                self._update_state(wid, status="selling", note=f"Stop-loss")
                                 exitp, sold = market_sell_qty(client, symbol, qty)
                                 pnl = (exitp/entry - 1)*100.0
                                 profit_usd = (exitp - entry) * sold
                                 log_row([ts.isoformat(), symbol, "SELL_SL", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"Worker {wid} stop-loss", wid])
                                 print(f"[SELL] W{wid} {symbol} SL @ {exitp:.6f} | P&L: {pnl:+.2f}%")
-                                self._last_sell_time[symbol] = now_utc(); self._update_state(wid, last_pnl=pnl)
+                                self._last_sell_time[symbol] = now_utc()
+                                self._update_state(wid, last_pnl=pnl)
                                 self._performance_metrics['total_sell_orders'] += 1
                                 self._performance_metrics['total_profit_usd'] += profit_usd
-                                print(f"[METRICS] Cumulative trade profit: ${self._performance_metrics['total_profit_usd']:.2f}")
                                 position_exit_reason = "stop_loss"
+                                break
+
+                            # Trailing stop
+                            elif trailing and price <= peak * (1.0 - TUNABLE_PARAMS['trail_giveback_pct'] / 100.0):
+                                self._update_state(wid, status="selling", note=f"Trailing stop")
+                                exitp, sold = market_sell_qty(client, symbol, qty)
+                                pnl = (exitp/entry - 1)*100.0
+                                profit_usd = (exitp - entry) * sold
+                                log_row([ts.isoformat(), symbol, "SELL_TRAIL", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"Worker {wid} trailing stop", wid])
+                                print(f"[SELL] W{wid} {symbol} TRAIL @ {exitp:.6f} | P&L: {pnl:+.2f}%")
+                                self._last_sell_time[symbol] = now_utc()
+                                self._update_state(wid, last_pnl=pnl)
+                                self._performance_metrics['total_sell_orders'] += 1
+                                self._performance_metrics['total_profit_usd'] += profit_usd
+                                position_exit_reason = "trailing_stop"
                                 break
 
                             time.sleep(POLL_SECONDS_ACTIVE)
 
-                        # Trade finished, clear context regardless of outcome
-                        st.entry_price = None; st.qty = None; st.started = None; st.symbol = None
+                        # Clear trade context after position exit
+                        st.entry_price = None
+                        st.qty = None
+                        st.started = None
+                        st.symbol = None
 
-                        # If stop was requested, clean up and exit after position properly closed
+                        # If stop was requested, clean up and exit
                         if stop_ev.is_set():
-                            print(f"[Worker-{wid}] Position closed naturally ({position_exit_reason}), cleaning up...")
+                            print(f"[Worker-{wid}] Position closed ({position_exit_reason}), stopping worker")
                             with self._lock:
+                                self._active_symbols.discard(symbol)
                                 self._workers.pop(wid, None)
                                 self._stop_flags.pop(wid, None)
                                 self._worker_state.pop(wid, None)
-                                # Release symbol from active set
-                                self._active_symbols.discard(symbol)
-                            print(f"[Worker-{wid}] Worker stopped after closing position")
                             return
 
-                    else: # No BUY signal, debug and continue
+                        # Release symbol and break from scanning loop to get new watchlist
+                        with self._lock:
+                            self._active_symbols.discard(symbol)
+                        print(f"[Worker-{wid}] Trade completed, getting new watchlist...")
+                        break
+
+                    else:
+                        # No buy signal, continue scanning
                         self._debug_push(symbol, wid, flags)
-                        self._update_state(wid, status="scanning", note=f"Scan {symbol}: {flags['reason']}")
 
                 except Exception as e:
-                    print(f"[Worker-{wid}] Analysis/Trade error for {symbol}: {type(e).__name__}: {e}")
-                    self._update_state(wid, status="error", note=f"Scan/Trade Error: {e}")
-                    # Ensure symbol is released on error
-                    with self._lock:
-                        self._active_symbols.discard(symbol)
-                    # Give a small break before next scan attempt
-                    time.sleep(0.5)
+                    print(f"[Worker-{wid}] Error analyzing {symbol}: {e}")
+                    self._update_state(wid, status="error", note=f"Analysis error: {e}")
 
                 finally:
-                    # Ensure symbol is released if it was reserved and no trade occurred
-                    with self._lock:
-                        if symbol in self._active_symbols and st.status not in ["in_position", "buying", "selling"]:
-                            self._active_symbols.discard(symbol)
+                    # Always release symbol reservation after scanning
+                    if symbol_reserved:
+                        with self._lock:
+                            # Only release if we're not in a position with this symbol
+                            if st.symbol != symbol or st.status not in ["in_position", "buying", "selling", "closing"]:
+                                self._active_symbols.discard(symbol)
 
-                # Cooldown period after finishing a trade or scan cycle
-                self._update_state(wid, status="cooldown", symbol=None, note=f"Cooldown {COOLDOWN_MINUTES}m")
-                time.sleep(COOLDOWN_MINUTES * 0.5) # Sleep for half cooldown to not block other workers
+                # 1.5 second pause between symbol scans as requested
+                time.sleep(1.5)
 
-            except Exception as e:
-                print(f"[Worker-{wid}] UNHANDLED ERROR in main loop: {type(e).__name__}: {e}")
-                self._update_state(wid, status="error", note=f"Unhandled error: {e}")
-                time.sleep(5) # Wait longer on severe errors
+            # If we finished scanning the entire list without finding a buy signal
+            if not found_buy_signal and not stop_ev.is_set():
+                print(f"[Worker-{wid}] Completed scan cycle, no signals found. Getting new watchlist...")
+                self._update_state(wid, status="scanning", symbol=None, note="Completed cycle, getting new list...")
+                time.sleep(2)  # Brief pause before next cycle
 
         print(f"[Worker-{wid}] Stopped")
         self._update_state(wid, status="stopped", note="Stopped")
@@ -1839,8 +1883,8 @@ class FastCycleBot:
             cur_price = tp_price = trail_arm_price = sl_price = None
             started_iso = st.started.isoformat() if st.started else None
 
-            # compute live metrics if in position
-            if st.status == "in_position" and st.symbol and st.entry_price and st.qty:
+            # compute live metrics if in position or closing
+            if st.status in ["in_position", "closing", "selling"] and st.symbol and st.entry_price and st.qty:
                 try:
                     cur_price = get_price_cached(self._client, st.symbol)
                     unreal_pct = (cur_price / st.entry_price - 1.0) * 100.0
@@ -1879,7 +1923,8 @@ class FastCycleBot:
                 'volume_multiplier': TUNABLE_PARAMS['vol_mult'],
                 'ema_strictness': TUNABLE_PARAMS['ema_relax'],
                 'buying_pattern': TUNABLE_PARAMS.get('buying_pattern', 1),
-                'cooldown_minutes': COOLDOWN_MINUTES
+                'cooldown_minutes': TUNABLE_PARAMS['cooldown_minutes'],
+                'reversal_threshold_pct': TUNABLE_PARAMS['reversal_threshold_pct']
             }
         }
 
@@ -2123,8 +2168,22 @@ def api_stop_worker():
         bot_instance = get_bot_instance()
         data = request.get_json(force=True, silent=True) or {}
         worker_id = int(data.get("worker_id"))
-        bot_instance.stop_worker(worker_id)
-        return jsonify({"worker_id": worker_id, "status": "stop_signal_sent"})
+        force = data.get("force", False)
+
+        if force:
+            # Force cleanup - immediately remove worker state
+            print(f"[API] Force cleanup requested for worker {worker_id}")
+            with bot_instance._lock:
+                st = bot_instance._worker_state.get(worker_id)
+                if st and st.symbol:
+                    bot_instance._active_symbols.discard(st.symbol)
+                bot_instance._workers.pop(worker_id, None)
+                bot_instance._stop_flags.pop(worker_id, None)
+                bot_instance._worker_state.pop(worker_id, None)
+            return jsonify({"worker_id": worker_id, "status": "force_cleaned"})
+        else:
+            bot_instance.stop_worker(worker_id)
+            return jsonify({"worker_id": worker_id, "status": "stop_signal_sent"})
     except Exception as e:
         print(f"[API] Stop-worker ERROR: {e}")
         return jsonify({"error": str(e)}), 500
@@ -2140,8 +2199,9 @@ def api_params():
             'min_day_volatility_pct': TUNABLE_PARAMS['min_day_volatility_pct'],
             'volume_multiplier': TUNABLE_PARAMS['vol_mult'],
             'ema_strictness': TUNABLE_PARAMS['ema_relax'],
-            'buying_pattern': TUNABLE_PARAMS.get('buying_pattern', 1),
-            'cooldown_minutes': COOLDOWN_MINUTES
+            'buying_pattern': TUNABLE_PARAMS['buying_pattern'],
+            'cooldown_minutes': TUNABLE_PARAMS['cooldown_minutes'],
+            'reversal_threshold_pct': TUNABLE_PARAMS['reversal_threshold_pct']
         })
     except Exception as e:
         print(f"[API] Get params ERROR: {e}")
@@ -2167,11 +2227,15 @@ def update_params():
             TUNABLE_PARAMS['vol_mult'] = float(data['volume_multiplier'])
         if 'ema_strictness' in data:
             TUNABLE_PARAMS['ema_relax'] = float(data['ema_strictness'])
+        if 'buying_pattern' in data:
+            TUNABLE_PARAMS['buying_pattern'] = int(data['buying_pattern'])
         if 'cooldown_minutes' in data:
-            global COOLDOWN_MINUTES
-            COOLDOWN_MINUTES = int(data['cooldown_minutes'])
+            TUNABLE_PARAMS['cooldown_minutes'] = int(data['cooldown_minutes'])
+        if 'reversal_threshold_pct' in data:
+            TUNABLE_PARAMS['reversal_threshold_pct'] = float(data['reversal_threshold_pct'])
 
-        return jsonify({"status": "success", "params": TUNABLE_PARAMS, "cooldown_minutes": COOLDOWN_MINUTES})
+        print(f"[API] Parameters updated: {TUNABLE_PARAMS}")
+        return jsonify({"status": "success", "params": TUNABLE_PARAMS})
     except Exception as e:
         print(f"[API] Update params ERROR: {e}")
         return jsonify({"error": str(e)}), 500
@@ -2382,37 +2446,23 @@ if __name__ == "__main__":
         log = logging.getLogger('werkzeug')
         log.setLevel(logging.ERROR)
 
-        # Try to find an available port
+        # Start Flask server directly on port 5000
         port = int(os.getenv("PORT", "5000"))
-        max_attempts = 5
 
-        for attempt in range(max_attempts):
-            try:
-                print(f"Dashboard will be available at: http://0.0.0.0:{port}")
-                app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
-                break
-            except OSError as e:
-                if "Address already in use" in str(e) and attempt < max_attempts - 1:
-                    port += 1
-                    print(f"⚠️ Port {port-1} in use, trying port {port}...")
-                    continue
-                else:
-                    raise e
+        print(f"🌐 Starting dashboard on port {port}...")
+        print(f"🔗 Dashboard URL: https://{os.getenv('REPL_SLUG', 'workspace')}-{os.getenv('REPL_OWNER', 'username')}.replit.app")
+
+        try:
+            app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+        except OSError as e:
+            if "Address already in use" in str(e):
+                print(f"⚠️ Port {port} is in use, trying port {port + 1}...")
+                app.run(host="0.0.0.0", port=port + 1, debug=False, threaded=True)
+            else:
+                raise e
 
     except Exception as e:
         print(f"CRITICAL ERROR: Failed to start Flask server or initialize bot: {e}")
         import traceback
         traceback.print_exc()
-
-        # Try to kill any existing processes on port 5000
-        print("Attempting to free up port 5000...")
-        try:
-            import subprocess
-            subprocess.run(["pkill", "-f", "python main.py"], check=False)
-            time.sleep(2)
-            print("Retrying server startup...")
-            port = 5000
-            app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
-        except Exception as retry_error:
-            print(f"Retry failed: {retry_error}")
-            sys.exit(1)
+        sys.exit(1)
