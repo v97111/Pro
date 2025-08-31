@@ -302,6 +302,9 @@
                 <button class="refresh-btn" onclick="loadAnalytics()">
                     <span id="refreshIcon">🔄</span> Refresh
                 </button>
+                <button class="refresh-btn" onclick="refreshFilters()" style="margin-left: 8px;">
+                    <span id="filterIcon">🔧</span> Filters
+                </button>
                 <a href="/" class="back-btn">← Back</a>
             </div>
         </div>
@@ -631,6 +634,41 @@
                 document.getElementById('serverIP').textContent = 'Unable to fetch';
                 document.getElementById('serverRegion').textContent = 'Unknown';
                 console.error('Failed to load server info:', error);
+            }
+        }
+
+        async function refreshFilters() {
+            const filterIcon = document.getElementById('filterIcon');
+            const originalIcon = filterIcon.textContent;
+            
+            try {
+                filterIcon.textContent = '⏳';
+                
+                const response = await fetch('/api/refresh-filters', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'}
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    console.error('Filter refresh error:', data.error);
+                    filterIcon.textContent = '❌';
+                } else {
+                    console.log('Filters refreshed successfully');
+                    filterIcon.textContent = '✅';
+                }
+                
+                setTimeout(() => {
+                    filterIcon.textContent = originalIcon;
+                }, 2000);
+                
+            } catch (error) {
+                console.error('Filter refresh failed:', error);
+                filterIcon.textContent = '❌';
+                setTimeout(() => {
+                    filterIcon.textContent = originalIcon;
+                }, 2000);
             }
         }
 
