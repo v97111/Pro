@@ -1120,14 +1120,12 @@ def market_buy_by_quote(client, symbol, quote_usdt):
 
 def market_sell_qty(client, symbol, qty):
     """
-    Sell available quantity using Decimal-based precise lot unit calculation to eliminate floating-point errors.
-    This ensures exact compliance with Binance LOT_SIZE filters by using high-precision decimal arithmetic.
+    Sell available quantity using improved lot size calculation to handle Binance filter requirements.
     """
     max_retries = 3
     for attempt in range(max_retries):
         try:
             # Use the worker's tracked quantity instead of account balance to avoid conflicts
-            # when multiple workers are trading the same asset
             available_qty = qty
 
             # Verify we have some balance (safety check)
@@ -1149,53 +1147,58 @@ def market_sell_qty(client, symbol, qty):
             if available_qty <= 0:
                 raise RuntimeError(f"No {asset} quantity available to sell")
 
-            # Get symbol filters
+            # Get symbol filters with retry
             tick, lot, min_notional = get_symbol_filters(client, symbol)
 
-            # DECIMAL-BASED LOT UNIT CALCULATION (eliminates floating-point errors)
-            if lot > 0:
-                # Convert to Decimal for precise arithmetic
-                available_decimal = Decimal(str(available_qty))
-                lot_decimal = Decimal(str(lot))
+            # Get current market lot size (may differ from stored filters)
+            try:
+                symbol_info = client.get_symbol_info(symbol)
+                market_lot_size = None
+                for filter_item in symbol_info.get('filters', []):
+                    if filter_item.get('filterType') == 'MARKET_LOT_SIZE':
+                        market_lot_size = float(filter_item.get('stepSize', lot))
+                        break
+                
+                # Use market lot size if available, otherwise use regular lot size
+                effective_lot = market_lot_size if market_lot_size else lot
+                print(f"[LOT_CHECK] Symbol: {symbol}, Regular lot: {lot}, Market lot: {market_lot_size}, Using: {effective_lot}")
+            except Exception as filter_error:
+                print(f"[LOT_CHECK] Could not get market lot size, using regular: {filter_error}")
+                effective_lot = lot
 
-                # Calculate lot units using Decimal division and floor
-                lot_units = int(available_decimal / lot_decimal)
+            # Calculate sellable quantity with improved logic
+            if effective_lot > 0:
+                # Use floor division to ensure we don't exceed lot requirements
+                lot_units = int(available_qty / effective_lot)
+                actual_qty = lot_units * effective_lot
 
-                # Calculate exact sellable quantity by multiplying back with Decimal
-                actual_qty_decimal = Decimal(lot_units) * lot_decimal
-                actual_qty = float(actual_qty_decimal)
-
-                # Determine precision from lot size for proper formatting
-                if lot >= 1:
+                # Determine precision from lot size
+                if effective_lot >= 1:
                     precision = 0
-                elif lot >= 0.1:
+                elif effective_lot >= 0.1:
                     precision = 1
-                elif lot >= 0.01:
+                elif effective_lot >= 0.01:
                     precision = 2
-                elif lot >= 0.001:
+                elif effective_lot >= 0.001:
                     precision = 3
-                elif lot >= 0.0001:
+                elif effective_lot >= 0.0001:
                     precision = 4
-                elif lot >= 0.000001:
+                elif effective_lot >= 0.00001:
+                    precision = 5
+                elif effective_lot >= 0.000001:
                     precision = 6
-                elif lot >= 0.0000001:
-                    precision = 7
                 else:
                     precision = 8
 
-                print(f"[DECIMAL_METHOD] Available: {available_qty:.8f}, Lot: {lot}")
-                print(f"[DECIMAL_METHOD] Lot units: {lot_units}, Sellable qty: {actual_qty:.8f}")
-
-                # Verification - should be exactly zero remainder with Decimal arithmetic
-                remainder_decimal = actual_qty_decimal % lot_decimal
-                print(f"[DECIMAL_VERIFY] Remainder check: {float(remainder_decimal):.20f}")
+                print(f"[IMPROVED_LOT] Available: {available_qty:.8f}, Effective lot: {effective_lot}")
+                print(f"[IMPROVED_LOT] Lot units: {lot_units}, Sellable qty: {actual_qty:.8f}")
 
             else:
                 actual_qty = available_qty
-                precision = 8  # Default precision
+                precision = 8
 
             if actual_qty <= 0:
-                raise RuntimeError(f"Quantity rounds to 0 after lot size adjustment. Available: {available_qty:.8f}, Lot: {lot}")
+                raise RuntimeError(f"Quantity rounds to 0 after lot size adjustment. Available: {available_qty:.8f}, Lot: {effective_lot}")
 
             # Check minimum notional value
             price = get_price_cached(client, symbol)
@@ -1204,27 +1207,17 @@ def market_sell_qty(client, symbol, qty):
             if trade_value < min_notional:
                 raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_notional:.2f}. Cannot proceed with sale.")
 
-            # Format quantity using Decimal to ensure exact precision
-            if lot > 0:
-                # Use Decimal formatting to avoid any floating-point representation issues
-                qty_decimal = Decimal(lot_units) * Decimal(str(lot))
-                if precision == 0:
-                    qty_str = str(int(qty_decimal))
-                else:
-                    # Quantize to exact precision to remove trailing zeros correctly
-                    quantize_exp = Decimal('0.1') ** precision
-                    qty_formatted = qty_decimal.quantize(quantize_exp, rounding=ROUND_DOWN)
-                    qty_str = f"{qty_formatted:.{precision}f}".rstrip('0').rstrip('.')
-                    if not qty_str or qty_str == '':
-                        qty_str = f"{qty_formatted:.{precision}f}"
+            # Format quantity as string with proper precision
+            if precision == 0:
+                qty_str = str(int(actual_qty))
             else:
                 qty_str = f"{actual_qty:.{precision}f}".rstrip('0').rstrip('.')
-                if not qty_str:
+                if not qty_str or qty_str == '.':
                     qty_str = f"{actual_qty:.{precision}f}"
 
             print(f"[SELL] Executing order: {qty_str} {asset} (value: {trade_value:.2f} USDT)")
 
-            # Execute the order using the precisely calculated quantity string
+            # Execute the order
             order = client.create_order(
                 symbol=symbol,
                 side="SELL",
@@ -1238,56 +1231,59 @@ def market_sell_qty(client, symbol, qty):
         except Exception as e:
             error_msg = str(e).lower()
 
-            # Handle specific error types
             if "lot_size" in error_msg and "code=-1013" in str(e):
                 print(f"[ERROR] LOT_SIZE filter failure on attempt {attempt + 1}: {e}")
-
-                # On final attempt, try with ultra-conservative rounding using Decimal
+                
                 if attempt == max_retries - 1:
-                    print(f"[FINAL_ATTEMPT] Using ultra-conservative Decimal calculation...")
+                    # Final attempt: try with reduced quantity
                     try:
-                        # Ultra-conservative: Reduce lot units by 1 and use Decimal precision
-                        conservative_units = max(0, int(Decimal(str(available_qty)) / Decimal(str(lot))) - 1)
+                        print(f"[FINAL_ATTEMPT] Trying with 99% of calculated quantity...")
+                        reduced_qty = actual_qty * 0.99
+                        if effective_lot > 0:
+                            reduced_units = int(reduced_qty / effective_lot)
+                            final_qty = reduced_units * effective_lot
+                        else:
+                            final_qty = reduced_qty
 
-                        if conservative_units > 0:
-                            conservative_decimal = Decimal(conservative_units) * Decimal(str(lot))
-                            conservative_qty = float(conservative_decimal)
-
+                        if final_qty > 0:
                             if precision == 0:
-                                conservative_str = str(int(conservative_decimal))
+                                final_qty_str = str(int(final_qty))
                             else:
-                                quantize_exp = Decimal('0.1') ** precision
-                                formatted_decimal = conservative_decimal.quantize(quantize_exp, rounding=ROUND_DOWN)
-                                conservative_str = f"{formatted_decimal:.{precision}f}".rstrip('0').rstrip('.')
-                                if not conservative_str:
-                                    conservative_str = f"{formatted_decimal:.{precision}f}"
+                                final_qty_str = f"{final_qty:.{precision}f}".rstrip('0').rstrip('.')
+                                if not final_qty_str or final_qty_str == '.':
+                                    final_qty_str = f"{final_qty:.{precision}f}"
 
-                            print(f"[FINAL_ATTEMPT] Ultra-conservative attempt with {conservative_str} {asset}")
-
+                            print(f"[FINAL_ATTEMPT] Trying with {final_qty_str} {asset}")
                             order = client.create_order(
                                 symbol=symbol,
                                 side="SELL",
                                 type="MARKET",
-                                quantity=conservative_str
+                                quantity=final_qty_str
                             )
-                            print(f"[FINAL_ATTEMPT] Ultra-conservative sell successful with {conservative_str}")
+                            print(f"[FINAL_ATTEMPT] Success with reduced quantity: {final_qty_str}")
                             break
                         else:
-                            raise RuntimeError(f"Cannot sell any valid quantity. Available: {available_qty:.8f}, Lot: {lot}")
-                    except Exception as conservative_error:
-                        print(f"[FINAL_ATTEMPT] Ultra-conservative method failed: {conservative_error}")
-                        raise e
+                            print(f"[FINAL_ATTEMPT] Reduced quantity is 0, cannot proceed")
+                            # Mark position as stuck and continue
+                            print(f"[WARNING] Position stuck due to LOT_SIZE constraints, will retry later")
+                            return price, 0  # Return 0 quantity to indicate failure
+                    except Exception as final_error:
+                        print(f"[FINAL_ATTEMPT] Failed: {final_error}")
+                        # Mark position as stuck
+                        print(f"[WARNING] Position stuck due to LOT_SIZE constraints")
+                        return price, 0
 
             elif "insufficient" in error_msg:
-                print(f"[ERROR] Insufficient balance error: {e}")
-                break  # Don't retry on balance issues
+                print(f"[ERROR] Insufficient balance: {e}")
+                break
             else:
                 print(f"[ERROR] Attempt {attempt + 1} failed: {e}")
 
             if attempt == max_retries - 1:
-                raise RuntimeError(f"Failed to execute sell order for {symbol} after {max_retries} attempts: {e}")
+                print(f"[ERROR] All sell attempts failed for {symbol}, marking position as stuck")
+                return price, 0
 
-            time.sleep(min(2 ** attempt, 3))  # Exponential backoff
+            time.sleep(min(2 ** attempt, 3))
 
     # Process the order response
     fills = order.get("fills", [])
@@ -1557,7 +1553,7 @@ class FastCycleBot:
             if not self._running:
                 raise RuntimeError("Failed to start bot core.")
 
-        # Balance validation - check only FREE USDT (fees are deducted from received amount)
+        # Enhanced balance validation - check FREE USDT and ensure total allocation doesn't exceed balance
         try:
             account = self._client.get_account()
             usdt_balance = 0.0
@@ -1566,16 +1562,33 @@ class FastCycleBot:
                     usdt_balance = float(balance['free'])  # Only free USDT, not locked
                     break
 
-            # Direct check - no buffer needed since fees come from received amount
+            # Calculate current total allocation from existing workers (excluding those in position)
+            active_allocation = 0.0
+            scanning_allocation = 0.0
+            
+            for worker in self._worker_state.values():
+                if worker.status in ["in_position", "buying", "selling", "closing"]:
+                    # These workers have already spent their allocation
+                    continue
+                elif worker.status in ["scanning", "stopped", "error"]:
+                    # These workers still have their allocation available
+                    scanning_allocation += worker.quote
+                    
+            # Total that would be needed if all scanning workers plus new worker tried to buy
+            total_potential_allocation = scanning_allocation + quote_amount
+
+            # Check if new worker would exceed available balance
+            if total_potential_allocation > usdt_balance:
+                raise RuntimeError(f"Cannot create worker: Total potential allocation would be {total_potential_allocation:.2f} USDT but only {usdt_balance:.2f} USDT available. Currently scanning: {scanning_allocation:.2f} USDT")
+
+            # Individual worker amount check
             if usdt_balance < quote_amount:
                 raise RuntimeError(f"Insufficient free USDT balance. Available: {usdt_balance:.2f} USDT, Required: {quote_amount:.2f} USDT")
 
-            # For logging purposes, calculate theoretical allocation
-            total_allocated = sum(worker.quote for worker in self._worker_state.values())
-            print(f"[Bot] Balance check: {usdt_balance:.2f} free USDT available, {total_allocated:.2f} theoretically allocated, {quote_amount:.2f} requested for new worker")
+            print(f"[Bot] Balance check OK: {usdt_balance:.2f} free USDT available, {scanning_allocation:.2f} allocated to scanning workers, {quote_amount:.2f} requested")
 
         except Exception as e:
-            if "Insufficient" in str(e):
+            if "Insufficient" in str(e) or "Cannot create worker" in str(e):
                 raise e
             else:
                 raise RuntimeError(f"Cannot verify USDT balance: {e}")
@@ -1726,11 +1739,22 @@ class FastCycleBot:
                             print(f"[BUY] W{wid} {symbol} @ {entry:.6f} | Qty: {qty:.4f}")
                             self._performance_metrics['total_buy_orders'] += 1
                         except Exception as buy_error:
+                            error_msg = str(buy_error)
                             print(f"[ERROR] W{wid} Buy failed for {symbol}: {buy_error}")
-                            self._update_state(wid, status="error", note=f"Buy failed: {buy_error}")
-                            with self._lock:
-                                self._active_symbols.discard(symbol)
-                            break  # Exit scanning loop to get new watchlist
+                            
+                            # If insufficient balance, pause this worker to prevent spam
+                            if "Insufficient" in error_msg:
+                                print(f"[WORKER-{wid}] Insufficient balance detected, pausing for 60 seconds...")
+                                self._update_state(wid, status="paused", note=f"Insufficient balance, pausing...")
+                                with self._lock:
+                                    self._active_symbols.discard(symbol)
+                                time.sleep(60)  # Pause for 1 minute
+                                break  # Exit scanning loop
+                            else:
+                                self._update_state(wid, status="error", note=f"Buy failed: {buy_error}")
+                                with self._lock:
+                                    self._active_symbols.discard(symbol)
+                                break  # Exit scanning loop to get new watchlist
 
                         # Store trade context
                         st.symbol = symbol
