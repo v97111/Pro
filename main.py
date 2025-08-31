@@ -1118,17 +1118,53 @@ def market_buy_by_quote(client, symbol, quote_usdt):
 
     return avg_price, qty
 
+def get_symbol_info(symbol):
+    """Get symbol information including minimum quantity and price filters"""
+    try:
+        exchange_info = client.get_exchange_info()
+        symbol_info = next((s for s in exchange_info['symbols'] if s['symbol'] == symbol), None)
+
+        if not symbol_info:
+            raise ValueError(f"Symbol {symbol} not found")
+
+        # Extract filters
+        lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+        min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MIN_NOTIONAL'), None)
+
+        return {
+            'min_qty': float(lot_size_filter['minQty']) if lot_size_filter else 0,
+            'step_size': float(lot_size_filter['stepSize']) if lot_size_filter else 0,
+            'min_notional': float(min_notional_filter['minNotional']) if min_notional_filter else 0,
+        }
+    except Exception as e:
+        print(f"[ERROR] Failed to get symbol info for {symbol}: {e}")
+        return {'min_qty': 0, 'step_size': 0, 'min_notional': 0}
+
+def adjust_quantity(symbol, quantity):
+    """Adjust quantity to meet exchange requirements"""
+    try:
+        symbol_info = get_symbol_info(symbol)
+        step_size = symbol_info['step_size']
+
+        if step_size > 0:
+            # Round down to the nearest step size
+            precision = len(str(step_size).rstrip('0').split('.')[-1])
+            adjusted_qty = round(quantity - (quantity % step_size), precision)
+            return max(adjusted_qty, symbol_info['min_qty'])
+
+        return quantity
+    except Exception as e:
+        print(f"[ERROR] Failed to adjust quantity for {symbol}: {e}")
+        return 0
+
 def market_sell_qty(client, symbol, qty):
     """
-    Sell available quantity using improved lot size calculation to handle Binance filter requirements.
+    Sell available quantity using proven working lot size method from successful code.
     """
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # Use the worker's tracked quantity instead of account balance to avoid conflicts
-            available_qty = qty
-
-            # Verify we have some balance (safety check)
+            # Verify we have balance to sell
             asset = symbol.replace('USDT', '')
             account = client.get_account()
             account_balance = 0.0
@@ -1141,200 +1177,64 @@ def market_sell_qty(client, symbol, qty):
             if account_balance <= 0:
                 raise RuntimeError(f"No {asset} balance available to sell")
 
-            # Use the minimum of tracked quantity and account balance for safety
-            available_qty = min(available_qty, account_balance)
+            # Use the minimum of tracked quantity and account balance
+            available_qty = min(qty, account_balance)
 
             if available_qty <= 0:
                 raise RuntimeError(f"No {asset} quantity available to sell")
 
-            # Get symbol filters with retry
-            tick, lot, min_notional = get_symbol_filters(client, symbol)
+            # Use the proven working method from the attached code
+            adjusted_quantity = adjust_quantity(symbol, available_qty)
 
-            # Get current market lot size (may differ from stored filters)
-            try:
-                symbol_info = client.get_symbol_info(symbol)
-                market_lot_size = None
-                for filter_item in symbol_info.get('filters', []):
-                    if filter_item.get('filterType') == 'MARKET_LOT_SIZE':
-                        market_lot_size = float(filter_item.get('stepSize', lot))
-                        break
-                
-                # Use market lot size if available, otherwise use regular lot size
-                effective_lot = market_lot_size if market_lot_size else lot
-                print(f"[LOT_CHECK] Symbol: {symbol}, Regular lot: {lot}, Market lot: {market_lot_size}, Using: {effective_lot}")
-            except Exception as filter_error:
-                print(f"[LOT_CHECK] Could not get market lot size, using regular: {filter_error}")
-                effective_lot = lot
-
-            # Enhanced LOT_SIZE calculation using Decimal for precision
-            if effective_lot > 0:
-                from decimal import Decimal, ROUND_DOWN
-                
-                # Convert to Decimal for precise calculations
-                available_decimal = Decimal(str(available_qty))
-                lot_decimal = Decimal(str(effective_lot))
-                
-                # Calculate lot units using floor division
-                lot_units = int(available_decimal / lot_decimal)
-                actual_qty_decimal = lot_units * lot_decimal
-                actual_qty = float(actual_qty_decimal)
-
-                # Determine precision from lot size with better logic
-                if effective_lot >= 1:
-                    precision = 0
-                elif effective_lot >= 0.1:
-                    precision = 1
-                elif effective_lot >= 0.01:
-                    precision = 2
-                elif effective_lot >= 0.001:
-                    precision = 3
-                elif effective_lot >= 0.0001:
-                    precision = 4
-                elif effective_lot >= 0.00001:
-                    precision = 5
-                elif effective_lot >= 0.000001:
-                    precision = 6
-                elif effective_lot >= 0.0000001:
-                    precision = 7
-                else:
-                    precision = 8
-
-                print(f"[DECIMAL_LOT] Available: {available_qty:.8f}, Effective lot: {effective_lot}")
-                print(f"[DECIMAL_LOT] Lot units: {lot_units}, Sellable qty: {actual_qty:.8f}")
-                print(f"[DECIMAL_LOT] Decimal check: {actual_qty_decimal}")
-
-            else:
-                actual_qty = available_qty
-                precision = 8
-
-            if actual_qty <= 0:
-                raise RuntimeError(f"Quantity rounds to 0 after lot size adjustment. Available: {available_qty:.8f}, Lot: {effective_lot}")
+            if adjusted_quantity <= 0:
+                raise RuntimeError(f"Quantity rounds to 0 after lot size adjustment. Available: {available_qty:.8f}")
 
             # Check minimum notional value
             price = get_price_cached(client, symbol)
-            trade_value = price * actual_qty
+            symbol_info = get_symbol_info(symbol)
+            notional_value = adjusted_quantity * price
+            
+            if notional_value < symbol_info['min_notional']:
+                raise RuntimeError(f"Trade value {notional_value:.2f} below minimum {symbol_info['min_notional']:.2f}")
 
-            if trade_value < min_notional:
-                raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_notional:.2f}. Cannot proceed with sale.")
+            print(f"[SELL] Executing order: {adjusted_quantity:.6f} {asset} (value: {notional_value:.2f} USDT)")
 
-            # Format quantity as string with proper precision
-            if precision == 0:
-                qty_str = str(int(actual_qty))
-            else:
-                qty_str = f"{actual_qty:.{precision}f}".rstrip('0').rstrip('.')
-                if not qty_str or qty_str == '.':
-                    qty_str = f"{actual_qty:.{precision}f}"
+            # Execute the order using the proven working method
+            order = client.order_market_sell(symbol=symbol, quantity=adjusted_quantity)
 
-            print(f"[SELL] Executing order: {qty_str} {asset} (value: {trade_value:.2f} USDT)")
-
-            # Execute the order
-            order = client.create_order(
-                symbol=symbol,
-                side="SELL",
-                type="MARKET",
-                quantity=qty_str
-            )
-
-            print(f"[SELL] Order executed successfully with quantity: {qty_str}")
+            print(f"[SELL] Order executed successfully with quantity: {adjusted_quantity:.6f}")
             break
 
         except Exception as e:
             error_msg = str(e).lower()
+            print(f"[ERROR] Attempt {attempt + 1} failed for {symbol}: {e}")
 
-            if "lot_size" in error_msg and "code=-1013" in str(e):
-                print(f"[ERROR] LOT_SIZE filter failure on attempt {attempt + 1}: {e}")
-                
+            if "lot_size" in error_msg:
                 if attempt == max_retries - 1:
-                    # Final attempt: try with reduced quantity
-                    try:
-                        print(f"[FINAL_ATTEMPT] Trying with 99% of calculated quantity...")
-                        reduced_qty = actual_qty * 0.99
-                        if effective_lot > 0:
-                            reduced_units = int(reduced_qty / effective_lot)
-                            final_qty = reduced_units * effective_lot
-                        else:
-                            final_qty = reduced_qty
-
-                        if final_qty > 0:
-                            if precision == 0:
-                                final_qty_str = str(int(final_qty))
-                            else:
-                                final_qty_str = f"{final_qty:.{precision}f}".rstrip('0').rstrip('.')
-                                if not final_qty_str or final_qty_str == '.':
-                                    final_qty_str = f"{final_qty:.{precision}f}"
-
-                            print(f"[FINAL_ATTEMPT] Trying with {final_qty_str} {asset}")
-                            order = client.create_order(
-                                symbol=symbol,
-                                side="SELL",
-                                type="MARKET",
-                                quantity=final_qty_str
-                            )
-                            print(f"[FINAL_ATTEMPT] Success with reduced quantity: {final_qty_str}")
-                            break
-                        else:
-                            print(f"[FINAL_ATTEMPT] Reduced quantity is 0, cannot proceed")
-                            # Mark position as stuck and continue
-                            print(f"[WARNING] Position stuck due to LOT_SIZE constraints, will retry later")
-                            return price, 0  # Return 0 quantity to indicate failure
-                    except Exception as final_error:
-                        print(f"[FINAL_ATTEMPT] Failed: {final_error}")
-                        
-                        # Emergency mode: Try selling with minimum lot size
-                        try:
-                            print(f"[EMERGENCY] Attempting emergency sell with minimum lot size...")
-                            emergency_qty = effective_lot * 100  # Try 100 lot units minimum
-                            if emergency_qty <= available_qty:
-                                if precision == 0:
-                                    emergency_qty_str = str(int(emergency_qty))
-                                else:
-                                    emergency_qty_str = f"{emergency_qty:.{precision}f}".rstrip('0').rstrip('.')
-                                
-                                print(f"[EMERGENCY] Trying emergency sell: {emergency_qty_str} {asset}")
-                                order = client.create_order(
-                                    symbol=symbol,
-                                    side="SELL",
-                                    type="MARKET",
-                                    quantity=emergency_qty_str
-                                )
-                                print(f"[EMERGENCY] Emergency sell successful!")
-                                return price, emergency_qty
-                            else:
-                                print(f"[EMERGENCY] Emergency quantity too large")
-                        except Exception as emergency_error:
-                            print(f"[EMERGENCY] Emergency sell failed: {emergency_error}")
-                        
-                        # Mark position as stuck
-                        print(f"[WARNING] Position stuck due to LOT_SIZE constraints")
-                        return price, 0
-
+                    print(f"[ERROR] Final lot size failure for {symbol}")
+                    return price, 0
             elif "insufficient" in error_msg:
                 print(f"[ERROR] Insufficient balance: {e}")
                 break
-            else:
-                print(f"[ERROR] Attempt {attempt + 1} failed: {e}")
 
             if attempt == max_retries - 1:
-                print(f"[ERROR] All sell attempts failed for {symbol}, marking position as stuck")
+                print(f"[ERROR] All sell attempts failed for {symbol}")
                 return price, 0
 
             time.sleep(min(2 ** attempt, 3))
 
-    # Process the order response
-    fills = order.get("fills", [])
-    if fills:
-        earned = sum(float(f["price"]) * float(f["qty"]) for f in fills)
-        sold = sum(float(f["qty"]) for f in fills)
-        avg_price = earned / sold if sold > 0 else price
-        final_qty = sold
-        print(f"[SELL] Success: Sold {final_qty:.8f} {asset} for {earned:.2f} USDT (avg price: {avg_price:.6f})")
-    else:
-        # Fallback calculation if no fills data
-        avg_price = price
-        final_qty = actual_qty
-        print(f"[SELL] Fallback calculation: {final_qty:.8f} {asset} at {avg_price:.6f}")
+    # Process the order response using the proven working method
+    try:
+        # Calculate average sell price from fills
+        total_sell_value = sum(float(fill['qty']) * float(fill['price']) for fill in order['fills'])
+        avg_sell_price = total_sell_value / adjusted_quantity
 
-    return avg_price, final_qty
+        print(f"[SELL] Success: Sold {adjusted_quantity:.8f} {asset} for {total_sell_value:.2f} USDT (avg price: {avg_sell_price:.6f})")
+        return avg_sell_price, adjusted_quantity
+    except Exception:
+        # Fallback calculation
+        print(f"[SELL] Fallback calculation: {adjusted_quantity:.8f} {asset} at {price:.6f}")
+        return price, adjusted_quantity
 
 # ------------------ Multi-Worker ----------------
 class WorkerState:
