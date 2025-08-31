@@ -609,14 +609,16 @@
             color: var(--success);
         }
 
-        .action-sell_tp_hard {
-            background: rgba(0, 122, 255, 0.15);
+        .action-sell_tp {
+            background: rgba(0, 122, 255, 0.25);
             color: var(--primary);
+            font-weight: 700;
         }
 
         .action-sell_tr {
-            background: rgba(255, 149, 0, 0.15);
-            color: var(--warning);
+            background: rgba(175, 82, 222, 0.25);
+            color: #AF52DE;
+            font-weight: 700;
         }
 
         .action-sell_sl {
@@ -730,12 +732,16 @@
                         <input type="number" class="param-input" id="volumeMultiplier" step="0.1" min="0.1" max="5.0">
                     </div>
                     <div class="param-row">
-                        <span class="param-label">EMA Strictness</span>
-                        <input type="number" class="param-input" id="emaStrictness" step="1" min="1" max="10">
+                        <span class="param-label">EMA Strictness (%)</span>
+                        <input type="number" class="param-input" id="emaStrictness" step="0.1" min="90.0" max="100.0">
                     </div>
                     <div class="param-row">
                         <span class="param-label">Buying Pattern</span>
                         <input type="number" class="param-input" id="buyingPattern" step="1" min="1" max="5">
+                    </div>
+                    <div class="param-row">
+                        <span class="param-label">Cooldown (minutes)</span>
+                        <input type="number" class="param-input" id="cooldownMinutes" step="1" min="1" max="60">
                     </div>
                 </div>
             </div>
@@ -1289,7 +1295,8 @@
                     // New buying conditions
                     volume_multiplier: parseFloat(document.getElementById('volumeMultiplier').value),
                     ema_strictness: parseFloat(document.getElementById('emaStrictness').value),
-                    buying_pattern: parseFloat(document.getElementById('buyingPattern').value)
+                    buyingPattern: parseFloat(document.getElementById('buyingPattern').value),
+                    cooldownMinutes: parseFloat(document.getElementById('cooldownMinutes').value)
                 };
 
                 const response = await post('/api/update-params', params);
@@ -1328,9 +1335,10 @@
                     'trailGivebackPct': params.trail_giveback_pct || 0.4,
                     'stopLossPct': params.stop_loss_pct || 1.0,
                     'minDayVolPct': params.min_day_volatility_pct || 0.5,
-                    'volumeMultiplier': params.volume_multiplier || 1.0,
-                    'emaStrictness': params.ema_strictness || 99,
-                    'buyingPattern': params.buying_pattern || 1
+                    'volumeMultiplier': params.volume_multiplier || 0.85,
+                    'emaStrictness': params.ema_strictness || 99.0,
+                    'buyingPattern': params.buying_pattern || 1,
+                    'cooldownMinutes': params.cooldown_minutes || 8
                 };
 
                 // Only update if user isn't currently editing (no focus)
@@ -1338,8 +1346,13 @@
                     const field = document.getElementById(fieldId);
                     if (field && document.activeElement !== field) {
                         field.value = value;
+                        // Log parameter loading for debugging
+                        console.log(`Loaded param ${fieldId}: ${value}`);
                     }
                 });
+
+                // Log all loaded parameters for debugging
+                console.log('All parameters loaded:', params);
             }
         }
 
@@ -1382,9 +1395,9 @@
                             </div>
                         </div>
 
-                        ${worker.status === 'in_position' ? `
+                        ${(worker.status === 'in_position' || worker.status === 'closing') && worker.unreal_pct !== null ? `
                             <div class="pnl-display">
-                                <div class="pnl-label">Current P&L</div>
+                                <div class="pnl-label">${worker.status === 'closing' ? 'Closing P&L' : 'Current P&L'}</div>
                                 <div class="pnl-value ${pnlClass}">${pnlValue}</div>
                             </div>
                         ` : ''}
