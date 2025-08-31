@@ -1147,9 +1147,16 @@ def adjust_quantity(symbol, quantity):
         step_size = symbol_info['step_size']
 
         if step_size > 0:
-            # Round down to the nearest step size
+            # Calculate lot units using integer division to avoid floating-point errors
+            lot_units = int(quantity / step_size)
+
+            # Calculate exact quantity by multiplying back
+            adjusted_qty = lot_units * step_size
+
+            # Format the adjusted quantity to the correct precision
             precision = len(str(step_size).rstrip('0').split('.')[-1])
-            adjusted_qty = round(quantity - (quantity % step_size), precision)
+            adjusted_qty = round(adjusted_qty, precision)
+
             return max(adjusted_qty, symbol_info['min_qty'])
 
         return quantity
@@ -1159,7 +1166,7 @@ def adjust_quantity(symbol, quantity):
 
 def market_sell_qty(client, symbol, qty):
     """
-    Sell available quantity using proven working lot size method from successful code.
+    Sell available quantity using INTEGER-BASED lot size calculation (same method as buy).
     """
     max_retries = 3
     for attempt in range(max_retries):
@@ -1183,26 +1190,68 @@ def market_sell_qty(client, symbol, qty):
             if available_qty <= 0:
                 raise RuntimeError(f"No {asset} quantity available to sell")
 
-            # Use the proven working method from the attached code
-            adjusted_quantity = adjust_quantity(symbol, available_qty)
+            # Get symbol filters
+            tick, lot, min_notional = get_symbol_filters(client, symbol)
+            
+            # INTEGER-BASED LOT CALCULATION (same as buy method)
+            if lot > 0:
+                # Calculate lot units using integer division to avoid floating-point errors
+                lot_units = int(available_qty / lot)
+                
+                # Calculate exact quantity by multiplying back
+                sellable_qty = lot_units * lot
+                
+                # Determine precision from lot size for proper formatting
+                if lot >= 1:
+                    precision = 0
+                elif lot >= 0.1:
+                    precision = 1
+                elif lot >= 0.01:
+                    precision = 2
+                elif lot >= 0.001:
+                    precision = 3
+                elif lot >= 0.0001:
+                    precision = 4
+                elif lot >= 0.00001:
+                    precision = 5
+                else:
+                    precision = 8
 
-            if adjusted_quantity <= 0:
+                print(f"[SELL_INTEGER] Available: {available_qty:.8f}, Lot: {lot}")
+                print(f"[SELL_INTEGER] Lot units: {lot_units}, Sellable qty: {sellable_qty:.8f}")
+
+                # Verification - should be exactly zero remainder
+                remainder_check = sellable_qty % lot
+                print(f"[SELL_VERIFY] Remainder check: {remainder_check:.20f}")
+
+            else:
+                sellable_qty = available_qty
+                precision = 8  # Default precision
+
+            if sellable_qty <= 0:
                 raise RuntimeError(f"Quantity rounds to 0 after lot size adjustment. Available: {available_qty:.8f}")
 
             # Check minimum notional value
             price = get_price_cached(client, symbol)
-            symbol_info = get_symbol_info(symbol)
-            notional_value = adjusted_quantity * price
+            notional_value = sellable_qty * price
             
-            if notional_value < symbol_info['min_notional']:
-                raise RuntimeError(f"Trade value {notional_value:.2f} below minimum {symbol_info['min_notional']:.2f}")
+            if notional_value < min_notional:
+                raise RuntimeError(f"Trade value {notional_value:.2f} below minimum {min_notional:.2f}")
 
-            print(f"[SELL] Executing order: {adjusted_quantity:.6f} {asset} (value: {notional_value:.2f} USDT)")
+            # Format quantity as string with proper precision (never send as float)
+            if precision == 0:
+                qty_str = str(int(sellable_qty))
+            else:
+                qty_str = f"{sellable_qty:.{precision}f}".rstrip('0').rstrip('.')
+                if not qty_str or qty_str == '':
+                    qty_str = f"{sellable_qty:.{precision}f}"
 
-            # Execute the order using the proven working method
-            order = client.order_market_sell(symbol=symbol, quantity=adjusted_quantity)
+            print(f"[SELL] Using quantity string: {qty_str} (value: {notional_value:.2f} USDT)")
 
-            print(f"[SELL] Order executed successfully with quantity: {adjusted_quantity:.6f}")
+            # Execute the order
+            order = client.create_order(symbol=symbol, side="SELL", type="MARKET", quantity=qty_str)
+
+            print(f"[SELL] Success using integer-based quantity method")
             break
 
         except Exception as e:
@@ -1223,18 +1272,22 @@ def market_sell_qty(client, symbol, qty):
 
             time.sleep(min(2 ** attempt, 3))
 
-    # Process the order response using the proven working method
+    # Process the order response
     try:
-        # Calculate average sell price from fills
-        total_sell_value = sum(float(fill['qty']) * float(fill['price']) for fill in order['fills'])
-        avg_sell_price = total_sell_value / adjusted_quantity
-
-        print(f"[SELL] Success: Sold {adjusted_quantity:.8f} {asset} for {total_sell_value:.2f} USDT (avg price: {avg_sell_price:.6f})")
-        return avg_sell_price, adjusted_quantity
+        fills = order.get("fills", [])
+        if fills:
+            total_sell_value = sum(float(fill['qty']) * float(fill['price']) for fill in fills)
+            sold_qty = sum(float(fill['qty']) for fill in fills)
+            avg_sell_price = total_sell_value / sold_qty if sold_qty > 0 else price
+            print(f"[SELL] Success: Sold {sold_qty:.8f} {asset} for {total_sell_value:.2f} USDT (avg price: {avg_sell_price:.6f})")
+            return avg_sell_price, sold_qty
+        else:
+            print(f"[SELL] Fallback calculation: {sellable_qty:.8f} {asset} at {price:.6f}")
+            return price, sellable_qty
     except Exception:
         # Fallback calculation
-        print(f"[SELL] Fallback calculation: {adjusted_quantity:.8f} {asset} at {price:.6f}")
-        return price, adjusted_quantity
+        print(f"[SELL] Fallback calculation: {sellable_qty:.8f} {asset} at {price:.6f}")
+        return price, sellable_qty
 
 # ------------------ Multi-Worker ----------------
 class WorkerState:
