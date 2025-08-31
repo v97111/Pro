@@ -1166,13 +1166,20 @@ def market_sell_qty(client, symbol, qty):
                 print(f"[LOT_CHECK] Could not get market lot size, using regular: {filter_error}")
                 effective_lot = lot
 
-            # Calculate sellable quantity with improved logic
+            # Enhanced LOT_SIZE calculation using Decimal for precision
             if effective_lot > 0:
-                # Use floor division to ensure we don't exceed lot requirements
-                lot_units = int(available_qty / effective_lot)
-                actual_qty = lot_units * effective_lot
+                from decimal import Decimal, ROUND_DOWN
+                
+                # Convert to Decimal for precise calculations
+                available_decimal = Decimal(str(available_qty))
+                lot_decimal = Decimal(str(effective_lot))
+                
+                # Calculate lot units using floor division
+                lot_units = int(available_decimal / lot_decimal)
+                actual_qty_decimal = lot_units * lot_decimal
+                actual_qty = float(actual_qty_decimal)
 
-                # Determine precision from lot size
+                # Determine precision from lot size with better logic
                 if effective_lot >= 1:
                     precision = 0
                 elif effective_lot >= 0.1:
@@ -1187,11 +1194,14 @@ def market_sell_qty(client, symbol, qty):
                     precision = 5
                 elif effective_lot >= 0.000001:
                     precision = 6
+                elif effective_lot >= 0.0000001:
+                    precision = 7
                 else:
                     precision = 8
 
-                print(f"[IMPROVED_LOT] Available: {available_qty:.8f}, Effective lot: {effective_lot}")
-                print(f"[IMPROVED_LOT] Lot units: {lot_units}, Sellable qty: {actual_qty:.8f}")
+                print(f"[DECIMAL_LOT] Available: {available_qty:.8f}, Effective lot: {effective_lot}")
+                print(f"[DECIMAL_LOT] Lot units: {lot_units}, Sellable qty: {actual_qty:.8f}")
+                print(f"[DECIMAL_LOT] Decimal check: {actual_qty_decimal}")
 
             else:
                 actual_qty = available_qty
@@ -1269,6 +1279,31 @@ def market_sell_qty(client, symbol, qty):
                             return price, 0  # Return 0 quantity to indicate failure
                     except Exception as final_error:
                         print(f"[FINAL_ATTEMPT] Failed: {final_error}")
+                        
+                        # Emergency mode: Try selling with minimum lot size
+                        try:
+                            print(f"[EMERGENCY] Attempting emergency sell with minimum lot size...")
+                            emergency_qty = effective_lot * 100  # Try 100 lot units minimum
+                            if emergency_qty <= available_qty:
+                                if precision == 0:
+                                    emergency_qty_str = str(int(emergency_qty))
+                                else:
+                                    emergency_qty_str = f"{emergency_qty:.{precision}f}".rstrip('0').rstrip('.')
+                                
+                                print(f"[EMERGENCY] Trying emergency sell: {emergency_qty_str} {asset}")
+                                order = client.create_order(
+                                    symbol=symbol,
+                                    side="SELL",
+                                    type="MARKET",
+                                    quantity=emergency_qty_str
+                                )
+                                print(f"[EMERGENCY] Emergency sell successful!")
+                                return price, emergency_qty
+                            else:
+                                print(f"[EMERGENCY] Emergency quantity too large")
+                        except Exception as emergency_error:
+                            print(f"[EMERGENCY] Emergency sell failed: {emergency_error}")
+                        
                         # Mark position as stuck
                         print(f"[WARNING] Position stuck due to LOT_SIZE constraints")
                         return price, 0
@@ -1553,7 +1588,7 @@ class FastCycleBot:
             if not self._running:
                 raise RuntimeError("Failed to start bot core.")
 
-        # Enhanced balance validation - check FREE USDT and ensure total allocation doesn't exceed balance
+        # Enhanced balance validation with minimum quote amount enforcement
         try:
             account = self._client.get_account()
             usdt_balance = 0.0
@@ -1561,6 +1596,12 @@ class FastCycleBot:
                 if balance['asset'] == 'USDT':
                     usdt_balance = float(balance['free'])  # Only free USDT, not locked
                     break
+
+            # Enforce minimum viable quote amount (Binance minimum notional is usually 5-10 USDT)
+            min_quote = 10.0
+            if quote_amount < min_quote:
+                quote_amount = min_quote
+                print(f"[Bot] Quote amount adjusted to minimum: {quote_amount:.2f} USDT")
 
             # Calculate current total allocation from existing workers (excluding those in position)
             active_allocation = 0.0
@@ -1570,7 +1611,7 @@ class FastCycleBot:
                 if worker.status in ["in_position", "buying", "selling", "closing"]:
                     # These workers have already spent their allocation
                     continue
-                elif worker.status in ["scanning", "stopped", "error"]:
+                elif worker.status in ["scanning", "stopped", "error", "paused"]:
                     # These workers still have their allocation available
                     scanning_allocation += worker.quote
                     
@@ -1581,9 +1622,9 @@ class FastCycleBot:
             if total_potential_allocation > usdt_balance:
                 raise RuntimeError(f"Cannot create worker: Total potential allocation would be {total_potential_allocation:.2f} USDT but only {usdt_balance:.2f} USDT available. Currently scanning: {scanning_allocation:.2f} USDT")
 
-            # Individual worker amount check
-            if usdt_balance < quote_amount:
-                raise RuntimeError(f"Insufficient free USDT balance. Available: {usdt_balance:.2f} USDT, Required: {quote_amount:.2f} USDT")
+            # Individual worker amount check with buffer
+            if usdt_balance < quote_amount + 2.0:  # Add 2 USDT buffer for fees
+                raise RuntimeError(f"Insufficient free USDT balance. Available: {usdt_balance:.2f} USDT, Required: {quote_amount + 2.0:.2f} USDT (including fee buffer)")
 
             print(f"[Bot] Balance check OK: {usdt_balance:.2f} free USDT available, {scanning_allocation:.2f} allocated to scanning workers, {quote_amount:.2f} requested")
 
