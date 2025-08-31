@@ -35,6 +35,472 @@ from decimal import Decimal, ROUND_DOWN, getcontext
 # Set high precision for Decimal calculations
 getcontext().prec = 28
 
+# ------------------ Robust Order Placement Module ------------------
+class BinanceOrderManager:
+    """
+    Robust order placement that always satisfies Binance filters to avoid -1013 LOT_SIZE errors
+    """
+    def __init__(self, client):
+        self.client = client
+        self._filter_cache = {}
+        self._cache_timestamp = {}
+        self.cache_ttl = 300  # 5 minutes
+
+    def _get_symbol_filters(self, symbol: str, mode: str = "spot"):
+        """Get latest filters for symbol with caching"""
+        cache_key = f"{symbol}_{mode}"
+        current_time = time.time()
+
+        # Check cache first
+        if (cache_key in self._filter_cache and
+            current_time - self._cache_timestamp.get(cache_key, 0) < self.cache_ttl):
+            return self._filter_cache[cache_key]
+
+        try:
+            if mode == "spot":
+                exchange_info = self.client.get_exchange_info()
+            elif mode == "usdm_futures":
+                exchange_info = self.client.futures_exchange_info()
+            elif mode == "coinm_futures":
+                exchange_info = self.client.futures_coin_exchange_info()
+            else:
+                raise ValueError(f"Unsupported mode: {mode}")
+
+            symbol_info = next((s for s in exchange_info['symbols'] if s['symbol'] == symbol), None)
+            if not symbol_info:
+                raise ValueError(f"Symbol {symbol} not found in {mode} exchange info")
+
+            # Extract all relevant filters
+            filters = {
+                'LOT_SIZE': None,
+                'MARKET_LOT_SIZE': None,
+                'PRICE_FILTER': None,
+                'NOTIONAL': None,
+                'MIN_NOTIONAL': None
+            }
+
+            for filter_info in symbol_info['filters']:
+                filter_type = filter_info['filterType']
+                if filter_type in filters:
+                    filters[filter_type] = filter_info
+
+            # Extract precision info
+            base_precision = symbol_info.get('baseAssetPrecision', 8)
+            quote_precision = symbol_info.get('quotePrecision', 8)
+
+            result = {
+                'filters': filters,
+                'base_precision': base_precision,
+                'quote_precision': quote_precision,
+                'symbol_info': symbol_info
+            }
+
+            # Cache the result
+            self._filter_cache[cache_key] = result
+            self._cache_timestamp[cache_key] = current_time
+
+            print(f"[FILTERS] {symbol} filters cached: LOT_SIZE={bool(filters['LOT_SIZE'])}, "
+                  f"MARKET_LOT_SIZE={bool(filters['MARKET_LOT_SIZE'])}, "
+                  f"PRICE_FILTER={bool(filters['PRICE_FILTER'])}")
+
+            return result
+
+        except Exception as e:
+            print(f"[ERROR] Failed to get filters for {symbol}: {e}")
+            # Return minimal defaults to prevent crashes
+            return {
+                'filters': {'LOT_SIZE': None, 'MARKET_LOT_SIZE': None, 'PRICE_FILTER': None, 'NOTIONAL': None, 'MIN_NOTIONAL': None},
+                'base_precision': 8,
+                'quote_precision': 8,
+                'symbol_info': None
+            }
+
+    def _get_step_size(self, symbol: str, order_type: str, mode: str = "spot"):
+        """Get appropriate step size based on order type"""
+        filter_data = self._get_symbol_filters(symbol, mode)
+        filters = filter_data['filters']
+
+        # For MARKET orders, prefer MARKET_LOT_SIZE if available
+        if order_type == "MARKET" and filters['MARKET_LOT_SIZE']:
+            step_size = Decimal(filters['MARKET_LOT_SIZE']['stepSize'])
+            min_qty = Decimal(filters['MARKET_LOT_SIZE']['minQty'])
+            max_qty = Decimal(filters['MARKET_LOT_SIZE']['maxQty'])
+            
+            # Fix: Check for invalid step size (0 or scientific notation causing issues)
+            if step_size <= 0 or str(step_size) in ['0E-8', '0E+0', '0.00000000']:
+                print(f"[STEP] {symbol} MARKET_LOT_SIZE has invalid step size: {step_size}, falling back to LOT_SIZE")
+                if filters['LOT_SIZE']:
+                    step_size = Decimal(filters['LOT_SIZE']['stepSize'])
+                    min_qty = Decimal(filters['LOT_SIZE']['minQty'])
+                    max_qty = Decimal(filters['LOT_SIZE']['maxQty'])
+                    print(f"[STEP] {symbol} using LOT_SIZE fallback: step={step_size}")
+                else:
+                    step_size = Decimal('0.00001')
+                    min_qty = Decimal('0.00001')
+                    max_qty = Decimal('9999999')
+                    print(f"[STEP] {symbol} using defaults: step={step_size}")
+            else:
+                print(f"[STEP] {symbol} MARKET using MARKET_LOT_SIZE: step={step_size}")
+                
+        elif filters['LOT_SIZE']:
+            step_size = Decimal(filters['LOT_SIZE']['stepSize'])
+            min_qty = Decimal(filters['LOT_SIZE']['minQty'])
+            max_qty = Decimal(filters['LOT_SIZE']['maxQty'])
+            print(f"[STEP] {symbol} using LOT_SIZE: step={step_size}")
+        else:
+            # Fallback defaults
+            step_size = Decimal('0.00001')
+            min_qty = Decimal('0.00001')
+            max_qty = Decimal('9999999')
+            print(f"[STEP] {symbol} using defaults: step={step_size}")
+
+        return step_size, min_qty, max_qty
+
+    def _get_tick_size(self, symbol: str, mode: str = "spot"):
+        """Get price tick size for LIMIT orders"""
+        filter_data = self._get_symbol_filters(symbol, mode)
+        filters = filter_data['filters']
+
+        if filters['PRICE_FILTER']:
+            tick_size = Decimal(filters['PRICE_FILTER']['tickSize'])
+            min_price = Decimal(filters['PRICE_FILTER']['minPrice'])
+            max_price = Decimal(filters['PRICE_FILTER']['maxPrice'])
+        else:
+            tick_size = Decimal('0.00000001')
+            min_price = Decimal('0.00000001')
+            max_price = Decimal('999999999')
+
+        return tick_size, min_price, max_price
+
+    def _get_min_notional(self, symbol: str, mode: str = "spot"):
+        """Get minimum notional value"""
+        filter_data = self._get_symbol_filters(symbol, mode)
+        filters = filter_data['filters']
+
+        min_notional = Decimal('0')
+
+        # Check both NOTIONAL and MIN_NOTIONAL filters
+        if filters['NOTIONAL']:
+            min_notional = Decimal(filters['NOTIONAL']['minNotional'])
+        elif filters['MIN_NOTIONAL']:
+            min_notional = Decimal(filters['MIN_NOTIONAL']['minNotional'])
+
+        return min_notional
+
+    def _round_quantity_to_step(self, raw_qty: Decimal, step_size: Decimal) -> Decimal:
+        """Round quantity DOWN to step multiple using Decimal precision"""
+        if step_size == 0:
+            return raw_qty
+
+        # Calculate step multiple (floor division)
+        step_multiple = raw_qty // step_size
+        rounded_qty = step_multiple * step_size
+
+        # Determine precision from step size
+        step_str = str(step_size)
+        if '.' in step_str:
+            decimals = len(step_str.split('.')[1].rstrip('0'))
+        else:
+            decimals = 0
+
+        # Quantize to proper decimal places
+        quantized_qty = rounded_qty.quantize(Decimal('0.1') ** decimals, rounding=ROUND_DOWN)
+
+        print(f"[QTY_ROUND] Raw: {raw_qty}, Step: {step_size}, Rounded: {quantized_qty}")
+        return quantized_qty
+
+    def _round_price_to_tick(self, raw_price: Decimal, tick_size: Decimal) -> Decimal:
+        """Round price to tick size using Decimal precision"""
+        if tick_size == 0:
+            return raw_price
+
+        # Floor to tick multiple
+        tick_multiple = raw_price // tick_size
+        rounded_price = tick_multiple * tick_size
+
+        # Determine precision from tick size
+        tick_str = str(tick_size)
+        if '.' in tick_str:
+            decimals = len(tick_str.split('.')[1].rstrip('0'))
+        else:
+            decimals = 0
+
+        # Quantize to proper decimal places
+        quantized_price = rounded_price.quantize(Decimal('0.1') ** decimals, rounding=ROUND_DOWN)
+
+        print(f"[PRICE_ROUND] Raw: {raw_price}, Tick: {tick_size}, Rounded: {quantized_price}")
+        return quantized_price
+
+    def _get_reference_price(self, symbol: str) -> Decimal:
+        """Get reference price for calculations"""
+        try:
+            ticker = self.client.get_symbol_ticker(symbol=symbol)
+            return Decimal(ticker['price'])
+        except Exception as e:
+            print(f"[ERROR] Failed to get reference price for {symbol}: {e}")
+            raise
+
+    def _validate_and_adjust_notional(self, symbol: str, price: Decimal, qty: Decimal,
+                                     intended_quote: Optional[Decimal], mode: str = "spot") -> Decimal:
+        """Validate and adjust quantity to meet minimum notional requirements"""
+        min_notional = self._get_min_notional(symbol, mode)
+
+        if min_notional == 0:
+            return qty
+
+        notional_value = price * qty
+
+        if notional_value >= min_notional:
+            print(f"[NOTIONAL] {symbol} OK: {notional_value} >= {min_notional}")
+            return qty
+
+        print(f"[NOTIONAL] {symbol} below minimum: {notional_value} < {min_notional}")
+
+        # If we have a quote budget, try to increase quantity
+        if intended_quote and intended_quote > min_notional:
+            step_size, min_qty, max_qty = self._get_step_size(symbol, "MARKET", mode)
+            required_qty = min_notional / price
+            adjusted_qty = self._round_quantity_to_step(required_qty, step_size)
+
+            # Ensure it doesn't exceed our budget
+            if price * adjusted_qty <= intended_quote:
+                print(f"[NOTIONAL] {symbol} quantity adjusted: {qty} -> {adjusted_qty}")
+                return adjusted_qty
+
+        # Cannot meet notional requirements
+        raise ValueError(f"Cannot meet minimum notional {min_notional} for {symbol} with current parameters")
+
+    def place_market_buy_order(self, symbol: str, quote_amount: float, mode: str = "spot", max_retries: int = 3):
+        """Place a robust market buy order that satisfies all Binance filters"""
+        intended_quote = Decimal(str(quote_amount))
+
+        for attempt in range(max_retries):
+            try:
+                print(f"[ROBUST_BUY] Attempt {attempt + 1} for {symbol} with {quote_amount} USDT")
+
+                # Step 1: Get latest filters
+                filter_data = self._get_symbol_filters(symbol, mode)
+
+                # Step 2: Try quoteOrderQty first for spot market buys
+                if mode == "spot":
+                    try:
+                        # Check if quoteOrderQty is supported
+                        order = self.client.create_order(
+                            symbol=symbol,
+                            side="BUY",
+                            type="MARKET",
+                            quoteOrderQty=str(intended_quote.quantize(Decimal('0.01')))
+                        )
+                        print(f"[ROBUST_BUY] Success using quoteOrderQty for {symbol}")
+                        return self._process_order_result(order, symbol, "BUY")
+                    except Exception as quote_error:
+                        print(f"[ROBUST_BUY] QuoteOrderQty failed for {symbol}: {quote_error}")
+                        # Fall through to quantity-based method
+
+                # Step 3: Quantity-based method
+                reference_price = self._get_reference_price(symbol)
+                raw_qty = intended_quote / reference_price
+
+                # Step 4: Get appropriate step size
+                step_size, min_qty, max_qty = self._get_step_size(symbol, "MARKET", mode)
+
+                # Step 5: Round quantity to step multiple
+                rounded_qty = self._round_quantity_to_step(raw_qty, step_size)
+
+                # Step 6: Enforce min/max quantity
+                if rounded_qty < min_qty:
+                    rounded_qty = min_qty
+                    print(f"[QTY_ADJUST] {symbol} increased to minQty: {rounded_qty}")
+                elif rounded_qty > max_qty:
+                    rounded_qty = max_qty
+                    print(f"[QTY_ADJUST] {symbol} capped to maxQty: {rounded_qty}")
+
+                # Step 7: Validate notional
+                rounded_qty = self._validate_and_adjust_notional(symbol, reference_price, rounded_qty, intended_quote, mode)
+
+                # Step 8: Format quantity string
+                qty_str = self._format_quantity(rounded_qty, step_size)
+
+                print(f"[ROBUST_BUY] Final order: {symbol} qty={qty_str} at ~{reference_price}")
+
+                # Step 9: Place order
+                order = self.client.create_order(
+                    symbol=symbol,
+                    side="BUY",
+                    type="MARKET",
+                    quantity=qty_str
+                )
+
+                print(f"[ROBUST_BUY] Success using quantity method for {symbol}")
+                return self._process_order_result(order, symbol, "BUY")
+
+            except Exception as e:
+                error_msg = str(e).lower()
+                print(f"[ROBUST_BUY] Attempt {attempt + 1} failed for {symbol}: {e}")
+
+                if "code=-1013" in error_msg and "lot_size" in error_msg:
+                    # Clear cache and retry with fresh filters
+                    cache_key = f"{symbol}_{mode}"
+                    self._filter_cache.pop(cache_key, None)
+                    self._cache_timestamp.pop(cache_key, None)
+                    print(f"[ROBUST_BUY] LOT_SIZE error, cleared cache for {symbol}")
+
+                    if attempt < max_retries - 1:
+                        jitter = 0.25 + (attempt * 0.25)  # 250-750ms jittered backoff
+                        time.sleep(jitter)
+                        continue
+
+                if attempt == max_retries - 1:
+                    raise RuntimeError(f"Failed to place buy order for {symbol} after {max_retries} attempts: {e}")
+
+                time.sleep(0.5 + attempt)  # Progressive backoff
+
+    def place_market_sell_order(self, symbol: str, quantity: float, mode: str = "spot", max_retries: int = 3):
+        """Place a robust market sell order that satisfies all Binance filters"""
+
+        for attempt in range(max_retries):
+            try:
+                print(f"[ROBUST_SELL] Attempt {attempt + 1} for {symbol} qty={quantity}")
+
+                # Step 1: Get latest filters
+                filter_data = self._get_symbol_filters(symbol, mode)
+
+                # Step 2: Get available balance
+                asset = symbol.replace('USDT', '')
+                account = self.client.get_account()
+                available_balance = Decimal('0')
+
+                for balance in account['balances']:
+                    if balance['asset'] == asset:
+                        available_balance = Decimal(balance['free'])
+                        break
+
+                if available_balance <= 0:
+                    raise ValueError(f"No {asset} balance available to sell")
+
+                # Step 3: Determine quantity to sell
+                intended_qty = min(Decimal(str(quantity)), available_balance)
+
+                # Step 4: Get step size for sell orders
+                step_size, min_qty, max_qty = self._get_step_size(symbol, "MARKET", mode)
+
+                # Step 5: For "sell all", use epsilon to avoid dust
+                epsilon = step_size * Decimal('2')  # 2x step size as epsilon
+                available_minus_epsilon = available_balance - epsilon
+
+                if intended_qty >= available_balance * Decimal('0.95'):  # If selling > 95%, treat as "sell all"
+                    raw_qty = available_minus_epsilon
+                    print(f"[SELL_ALL] {symbol} sell-all mode: {available_balance} - {epsilon} = {raw_qty}")
+                else:
+                    raw_qty = intended_qty
+
+                # Step 6: Round quantity to step multiple
+                rounded_qty = self._round_quantity_to_step(raw_qty, step_size)
+
+                # Step 7: Enforce min/max quantity
+                if rounded_qty < min_qty:
+                    if available_balance >= min_qty:
+                        rounded_qty = min_qty
+                        print(f"[QTY_ADJUST] {symbol} increased to minQty: {rounded_qty}")
+                    else:
+                        raise ValueError(f"Available balance {available_balance} below minimum quantity {min_qty}")
+                elif rounded_qty > max_qty:
+                    rounded_qty = max_qty
+                    print(f"[QTY_ADJUST] {symbol} capped to maxQty: {rounded_qty}")
+
+                # Step 8: Emergency validation - prevent zero quantity orders
+                if rounded_qty <= 0:
+                    # Last resort: try using 90% of available balance with step adjustment
+                    emergency_qty = available_balance * Decimal('0.9')
+                    rounded_qty = self._round_quantity_to_step(emergency_qty, step_size)
+
+                    if rounded_qty <= 0:
+                        # Final fallback: use minimum quantity if balance allows
+                        if available_balance >= min_qty * Decimal('1.1'):  # 10% buffer
+                            rounded_qty = min_qty
+                            print(f"[EMERGENCY] {symbol} using minQty as last resort: {rounded_qty}")
+                        else:
+                            raise ValueError(f"Cannot resolve zero quantity for {symbol}: all methods failed")
+
+                # Step 9: Format quantity string
+                qty_str = self._format_quantity(rounded_qty, step_size)
+
+                # Final validation before order placement
+                if not qty_str or qty_str == "0" or float(qty_str) <= 0:
+                    raise ValueError(f"Invalid quantity string for {symbol}: '{qty_str}'")
+
+                print(f"[ROBUST_SELL] Final order: {symbol} qty={qty_str} (from {available_balance} available)")
+
+                # Step 10: Place order
+                order = self.client.create_order(
+                    symbol=symbol,
+                    side="SELL",
+                    type="MARKET",
+                    quantity=qty_str
+                )
+
+                print(f"[ROBUST_SELL] Success for {symbol}")
+                return self._process_order_result(order, symbol, "SELL")
+
+            except Exception as e:
+                error_msg = str(e).lower()
+                print(f"[ROBUST_SELL] Attempt {attempt + 1} failed for {symbol}: {e}")
+
+                if "code=-1013" in error_msg and "lot_size" in error_msg:
+                    # Clear cache and retry with fresh filters
+                    cache_key = f"{symbol}_{mode}"
+                    self._filter_cache.pop(cache_key, None)
+                    self._cache_timestamp.pop(cache_key, None)
+                    print(f"[ROBUST_SELL] LOT_SIZE error, cleared cache for {symbol}")
+
+                    if attempt < max_retries - 1:
+                        jitter = 0.25 + (attempt * 0.25)  # 250-750ms jittered backoff
+                        time.sleep(jitter)
+                        continue
+
+                if attempt == max_retries - 1:
+                    raise RuntimeError(f"Failed to place sell order for {symbol} after {max_retries} attempts: {e}")
+
+                time.sleep(0.5 + attempt)  # Progressive backoff
+
+    def _format_quantity(self, qty: Decimal, step_size: Decimal) -> str:
+        """Format quantity as string with proper precision"""
+        step_str = str(step_size)
+        if '.' in step_str:
+            decimals = len(step_str.split('.')[1].rstrip('0'))
+        else:
+            decimals = 0
+
+        if decimals == 0:
+            return str(int(qty))
+        else:
+            formatted = f"{qty:.{decimals}f}".rstrip('0').rstrip('.')
+            return formatted if formatted else f"{qty:.{decimals}f}"
+
+    def _process_order_result(self, order, symbol: str, side: str):
+        """Process order result and return standardized format"""
+        fills = order.get("fills", [])
+
+        if fills:
+            if side == "BUY":
+                total_spent = sum(Decimal(f["price"]) * Decimal(f["qty"]) for f in fills)
+                total_qty = sum(Decimal(f["qty"]) for f in fills)
+                avg_price = total_spent / total_qty if total_qty > 0 else Decimal('0')
+                print(f"[ORDER_RESULT] BUY {symbol}: Got {total_qty} for {total_spent} USDT (avg: {avg_price})")
+                return float(avg_price), float(total_qty)
+            else:  # SELL
+                total_received = sum(Decimal(f["price"]) * Decimal(f["qty"]) for f in fills)
+                total_qty = sum(Decimal(f["qty"]) for f in fills)
+                avg_price = total_received / total_qty if total_qty > 0 else Decimal('0')
+                print(f"[ORDER_RESULT] SELL {symbol}: Sold {total_qty} for {total_received} USDT (avg: {avg_price})")
+                return float(avg_price), float(total_qty)
+        else:
+            # Fallback if no fills data
+            print(f"[ORDER_RESULT] No fills data for {symbol}, using order response")
+            price = float(order.get('price', 0))
+            qty = float(order.get('executedQty', order.get('origQty', 0)))
+            return price, qty
+
 # ---- Concurrency / caches ----
 LOG_LOCK = threading.Lock()
 PRICES_LOCK = threading.Lock()
@@ -983,140 +1449,9 @@ def evaluate_buy_checks(client, symbol, cache, policy):
 
 # ------------------ Orders ----------------------
 def market_buy_by_quote(client, symbol, quote_usdt):
-    max_retries = 3
-
-    # Balance validation - check only free USDT (fees are deducted from received amount)
-    for balance_check in range(3):
-        try:
-            account = client.get_account()
-            usdt_balance = 0.0
-            for balance in account['balances']:
-                if balance['asset'] == 'USDT':
-                    usdt_balance = float(balance['free'])  # Only free USDT
-                    break
-
-            # Direct comparison - no buffer needed as fees come from received amount
-            if usdt_balance < float(quote_usdt):
-                raise RuntimeError(f"Insufficient USDT balance. Available: {usdt_balance:.2f}, Required: {quote_usdt}")
-
-            print(f"[BUY] Balance check OK: {usdt_balance:.2f} free USDT available")
-            break
-
-        except Exception as balance_error:
-            if "Insufficient" in str(balance_error):
-                raise balance_error
-            if balance_check == 2:
-                print(f"[BUY] Warning - Could not verify balance after 3 attempts: {balance_error}")
-                break
-            time.sleep(1)
-
-    for attempt in range(max_retries):
-        try:
-            price = get_price_cached(client, symbol)
-            tick, lot, min_notional = get_symbol_filters(client, symbol)
-            min_req = max(10.0, min_notional)  # No buffer needed
-            spend = max(float(quote_usdt), min_req)
-
-            print(f"[BUY] Attempting to buy {symbol} with {spend:.2f} USDT at ~{price:.6f}")
-            print(f"[FILTERS] {symbol}: tick={tick}, lot={lot}, min_notional={min_notional}")
-
-            try:
-                # Try quoteOrderQty first (preferred for market orders)
-                order = client.create_order(symbol=symbol, side="BUY", type="MARKET", quoteOrderQty=round(spend, 2))
-                print(f"[BUY] Success using quoteOrderQty method")
-            except Exception as quote_error:
-                print(f"[BUY] QuoteOrderQty failed for {symbol}, using quantity method: {quote_error}")
-
-                # INTEGER-BASED LOT CALCULATION (same as sell method)
-                raw_qty = spend / price
-
-                if lot > 0:
-                    # Calculate lot units using integer division to avoid floating-point errors
-                    lot_units = int(raw_qty / lot)
-
-                    # Calculate exact quantity by multiplying back
-                    qty = lot_units * lot
-
-                    # Determine precision from lot size for proper formatting
-                    if lot >= 1:
-                        precision = 0
-                    elif lot >= 0.1:
-                        precision = 1
-                    elif lot >= 0.01:
-                        precision = 2
-                    elif lot >= 0.001:
-                        precision = 3
-                    elif lot >= 0.0001:
-                        precision = 4
-                    elif lot >= 0.00001:
-                        precision = 5
-                    else:
-                        precision = 8
-
-                    print(f"[BUY_INTEGER] Raw qty: {raw_qty:.8f}, Lot: {lot}")
-                    print(f"[BUY_INTEGER] Lot units: {lot_units}, Final qty: {qty:.8f}")
-
-                    # Verification - should be exactly zero remainder
-                    remainder_check = qty % lot
-                    print(f"[BUY_VERIFY] Remainder check: {remainder_check:.20f}")
-
-                else:
-                    qty = raw_qty
-                    precision = 8  # Default precision
-
-                if qty <= 0:
-                    raise RuntimeError(f"Quantity rounds to 0. Raw: {raw_qty:.8f}, Lot: {lot}, Calculated: {qty}")
-
-                # Verify minimum notional
-                trade_value = price * qty
-                if trade_value < min_notional:
-                    raise RuntimeError(f"Trade value {trade_value:.2f} below minimum {min_notional:.2f}")
-
-                # Format quantity as string with proper precision (never send as float)
-                if precision == 0:
-                    qty_str = str(int(qty))
-                else:
-                    qty_str = f"{qty:.{precision}f}".rstrip('0').rstrip('.')
-                    if not qty_str or qty_str == '':
-                        qty_str = f"{qty:.{precision}f}"
-
-                print(f"[BUY] Using quantity string: {qty_str} (value: {trade_value:.2f} USDT)")
-                order = client.create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty_str)
-                print(f"[BUY] Success using integer-based quantity method")
-            break
-
-        except Exception as e:
-            error_msg = str(e).lower()
-            if "insufficient balance" in error_msg:
-                raise RuntimeError(f"Insufficient balance confirmed by exchange: {e}")
-            elif "lot_size" in error_msg:
-                print(f"[WARN] LOT_SIZE error on attempt {attempt + 1}: {e}")
-                if attempt < max_retries - 1:
-                    # Try with slightly different quantity calculation
-                    time.sleep(1)
-                    continue
-            elif "precision" in error_msg:
-                print(f"[WARN] Precision error on attempt {attempt + 1}: {e}")
-
-            if attempt == max_retries - 1:
-                raise RuntimeError(f"Failed to execute buy order for {symbol} after {max_retries} attempts: {e}")
-            print(f"[WARN] Buy attempt {attempt + 1} failed for {symbol}: {e}")
-            time.sleep(min(2 ** attempt, 3))
-
-    # Process the order response
-    fills = order.get("fills", [])
-    if fills:
-        spent_total = sum(float(f["price"]) * float(f["qty"]) for f in fills)
-        got_qty = sum(float(f["qty"]) for f in fills)
-        avg_price = spent_total / got_qty if got_qty > 0 else price
-        qty = got_qty
-        print(f"[BUY] Success: Got {qty:.8f} {symbol.replace('USDT', '')} for {spent_total:.2f} USDT (avg price: {avg_price:.6f})")
-    else:
-        qty = spend / price
-        avg_price = price
-        print(f"[BUY] Fallback calculation: {qty:.8f} {symbol.replace('USDT', '')} at {avg_price:.6f}")
-
-    return avg_price, qty
+    """Legacy wrapper for robust buy order placement"""
+    order_manager = BinanceOrderManager(client)
+    return order_manager.place_market_buy_order(symbol, float(quote_usdt))
 
 def get_symbol_info(symbol):
     """Get symbol information including minimum quantity and price filters"""
@@ -1165,129 +1500,9 @@ def adjust_quantity(symbol, quantity):
         return 0
 
 def market_sell_qty(client, symbol, qty):
-    """
-    Sell available quantity using INTEGER-BASED lot size calculation (same method as buy).
-    """
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # Verify we have balance to sell
-            asset = symbol.replace('USDT', '')
-            account = client.get_account()
-            account_balance = 0.0
-
-            for balance in account['balances']:
-                if balance['asset'] == asset:
-                    account_balance = float(balance['free'])
-                    break
-
-            if account_balance <= 0:
-                raise RuntimeError(f"No {asset} balance available to sell")
-
-            # Use the minimum of tracked quantity and account balance
-            available_qty = min(qty, account_balance)
-
-            if available_qty <= 0:
-                raise RuntimeError(f"No {asset} quantity available to sell")
-
-            # Get symbol filters
-            tick, lot, min_notional = get_symbol_filters(client, symbol)
-            
-            # INTEGER-BASED LOT CALCULATION (same as buy method)
-            if lot > 0:
-                # Calculate lot units using integer division to avoid floating-point errors
-                lot_units = int(available_qty / lot)
-                
-                # Calculate exact quantity by multiplying back
-                sellable_qty = lot_units * lot
-                
-                # Determine precision from lot size for proper formatting
-                if lot >= 1:
-                    precision = 0
-                elif lot >= 0.1:
-                    precision = 1
-                elif lot >= 0.01:
-                    precision = 2
-                elif lot >= 0.001:
-                    precision = 3
-                elif lot >= 0.0001:
-                    precision = 4
-                elif lot >= 0.00001:
-                    precision = 5
-                else:
-                    precision = 8
-
-                print(f"[SELL_INTEGER] Available: {available_qty:.8f}, Lot: {lot}")
-                print(f"[SELL_INTEGER] Lot units: {lot_units}, Sellable qty: {sellable_qty:.8f}")
-
-                # Verification - should be exactly zero remainder
-                remainder_check = sellable_qty % lot
-                print(f"[SELL_VERIFY] Remainder check: {remainder_check:.20f}")
-
-            else:
-                sellable_qty = available_qty
-                precision = 8  # Default precision
-
-            if sellable_qty <= 0:
-                raise RuntimeError(f"Quantity rounds to 0 after lot size adjustment. Available: {available_qty:.8f}")
-
-            # Check minimum notional value
-            price = get_price_cached(client, symbol)
-            notional_value = sellable_qty * price
-            
-            if notional_value < min_notional:
-                raise RuntimeError(f"Trade value {notional_value:.2f} below minimum {min_notional:.2f}")
-
-            # Format quantity as string with proper precision (never send as float)
-            if precision == 0:
-                qty_str = str(int(sellable_qty))
-            else:
-                qty_str = f"{sellable_qty:.{precision}f}".rstrip('0').rstrip('.')
-                if not qty_str or qty_str == '':
-                    qty_str = f"{sellable_qty:.{precision}f}"
-
-            print(f"[SELL] Using quantity string: {qty_str} (value: {notional_value:.2f} USDT)")
-
-            # Execute the order
-            order = client.create_order(symbol=symbol, side="SELL", type="MARKET", quantity=qty_str)
-
-            print(f"[SELL] Success using integer-based quantity method")
-            break
-
-        except Exception as e:
-            error_msg = str(e).lower()
-            print(f"[ERROR] Attempt {attempt + 1} failed for {symbol}: {e}")
-
-            if "lot_size" in error_msg:
-                if attempt == max_retries - 1:
-                    print(f"[ERROR] Final lot size failure for {symbol}")
-                    return price, 0
-            elif "insufficient" in error_msg:
-                print(f"[ERROR] Insufficient balance: {e}")
-                break
-
-            if attempt == max_retries - 1:
-                print(f"[ERROR] All sell attempts failed for {symbol}")
-                return price, 0
-
-            time.sleep(min(2 ** attempt, 3))
-
-    # Process the order response
-    try:
-        fills = order.get("fills", [])
-        if fills:
-            total_sell_value = sum(float(fill['qty']) * float(fill['price']) for fill in fills)
-            sold_qty = sum(float(fill['qty']) for fill in fills)
-            avg_sell_price = total_sell_value / sold_qty if sold_qty > 0 else price
-            print(f"[SELL] Success: Sold {sold_qty:.8f} {asset} for {total_sell_value:.2f} USDT (avg price: {avg_sell_price:.6f})")
-            return avg_sell_price, sold_qty
-        else:
-            print(f"[SELL] Fallback calculation: {sellable_qty:.8f} {asset} at {price:.6f}")
-            return price, sellable_qty
-    except Exception:
-        # Fallback calculation
-        print(f"[SELL] Fallback calculation: {sellable_qty:.8f} {asset} at {price:.6f}")
-        return price, sellable_qty
+    """Legacy wrapper for robust sell order placement"""
+    order_manager = BinanceOrderManager(client)
+    return order_manager.place_market_sell_order(symbol, float(qty))
 
 # ------------------ Multi-Worker ----------------
 class WorkerState:
@@ -1374,6 +1589,11 @@ class FastCycleBot:
         self.trade_analyzer = TradeAnalyzer(LOG_FILE)
         self._error_counts = defaultdict(int)
         self._last_error_time = defaultdict(float)
+
+        # Initialize robust order manager
+        self._order_manager = BinanceOrderManager(self._client)
+        print("✓ Robust order manager initialized")
+
         self._performance_metrics = {
             'total_trades': 0,
             'successful_trades': 0,
@@ -1492,7 +1712,7 @@ class FastCycleBot:
                         self.current_net_usdt = new_balance
                         last_balance_time = current_time
                         consecutive_failures = 0
-                        print(f"[METRICS] Balance updated: {new_balance:.2f} USDT")
+                        # Balance updated silently - check dashboard for current value
                     except Exception as e:
                         consecutive_failures += 1
                         error_msg = str(e)
@@ -1559,7 +1779,7 @@ class FastCycleBot:
             # Calculate current total allocation from existing workers (excluding those in position)
             active_allocation = 0.0
             scanning_allocation = 0.0
-            
+
             for worker in self._worker_state.values():
                 if worker.status in ["in_position", "buying", "selling", "closing"]:
                     # These workers have already spent their allocation
@@ -1567,7 +1787,7 @@ class FastCycleBot:
                 elif worker.status in ["scanning", "stopped", "error", "paused"]:
                     # These workers still have their allocation available
                     scanning_allocation += worker.quote
-                    
+
             # Total that would be needed if all scanning workers plus new worker tried to buy
             total_potential_allocation = scanning_allocation + quote_amount
 
@@ -1724,10 +1944,10 @@ class FastCycleBot:
                         print(f"[Worker-{wid}] 🎯 BUY SIGNAL for {symbol}")
                         found_buy_signal = True
 
-                        # Execute buy order
+                        # Execute buy order using robust order manager
                         self._update_state(wid, status="buying", symbol=symbol, note=f"Buying {symbol}")
                         try:
-                            entry, qty = market_buy_by_quote(client, symbol, st.quote)
+                            entry, qty = self._order_manager.place_market_buy_order(symbol, st.quote)
                             start = now_utc()
                             log_row([start.isoformat(), symbol, "BUY", f"{entry:.8f}", f"{qty:.8f}", "", f"Worker {wid} buy signal", wid])
                             print(f"[BUY] W{wid} {symbol} @ {entry:.6f} | Qty: {qty:.4f}")
@@ -1735,7 +1955,7 @@ class FastCycleBot:
                         except Exception as buy_error:
                             error_msg = str(buy_error)
                             print(f"[ERROR] W{wid} Buy failed for {symbol}: {buy_error}")
-                            
+
                             # If insufficient balance, pause this worker to prevent spam
                             if "Insufficient" in error_msg:
                                 print(f"[WORKER-{wid}] Insufficient balance detected, pausing for 60 seconds...")
@@ -1785,17 +2005,23 @@ class FastCycleBot:
                             # Immediate take-profit (simplified logic)
                             if price >= hard_tp and not trailing:
                                 self._update_state(wid, status="selling", note=f"Take profit hit")
-                                exitp, sold = market_sell_qty(client, symbol, qty)
-                                pnl = (exitp/entry - 1)*100.0
-                                profit_usd = (exitp - entry) * sold
-                                log_row([ts.isoformat(), symbol, "SELL_TP", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"Worker {wid} take-profit", wid])
-                                print(f"[SELL] W{wid} {symbol} TP @ {exitp:.6f} | P&L: {pnl:+.2f}%")
-                                self._last_sell_time[symbol] = now_utc()
-                                self._update_state(wid, last_pnl=pnl)
-                                self._performance_metrics['total_sell_orders'] += 1
-                                self._performance_metrics['total_profit_usd'] += profit_usd
-                                position_exit_reason = "take_profit"
-                                break
+                                exitp, sold = self._order_manager.place_market_sell_order(symbol, qty)
+
+                                # Only log and exit if sell actually succeeded
+                                if sold > 0:
+                                    pnl = (exitp/entry - 1)*100.0
+                                    profit_usd = (exitp - entry) * sold
+                                    log_row([ts.isoformat(), symbol, "SELL_TP", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"Worker {wid} take-profit", wid])
+                                    print(f"[SELL] W{wid} {symbol} TP @ {exitp:.6f} | P&L: {pnl:+.2f}%")
+                                    self._last_sell_time[symbol] = now_utc()
+                                    self._update_state(wid, last_pnl=pnl)
+                                    self._performance_metrics['total_sell_orders'] += 1
+                                    self._performance_metrics['total_profit_usd'] += profit_usd
+                                    position_exit_reason = "take_profit"
+                                    break
+                                else:
+                                    print(f"[ERROR] W{wid} Failed to sell {symbol} for take-profit, continuing position monitoring")
+                                    continue
 
                             # Trail arming
                             elif not trailing and price >= trail_arm:
@@ -1806,32 +2032,42 @@ class FastCycleBot:
                             stop_loss_threshold = entry * (1.0 - TUNABLE_PARAMS['stop_loss_pct'] / 100.0)
                             if price <= stop_loss_threshold:
                                 self._update_state(wid, status="selling", note=f"Stop-loss")
-                                exitp, sold = market_sell_qty(client, symbol, qty)
-                                pnl = (exitp/entry - 1)*100.0
-                                profit_usd = (exitp - entry) * sold
-                                log_row([ts.isoformat(), symbol, "SELL_SL", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"Worker {wid} stop-loss", wid])
-                                print(f"[SELL] W{wid} {symbol} SL @ {exitp:.6f} | P&L: {pnl:+.2f}%")
-                                self._last_sell_time[symbol] = now_utc()
-                                self._update_state(wid, last_pnl=pnl)
-                                self._performance_metrics['total_sell_orders'] += 1
-                                self._performance_metrics['total_profit_usd'] += profit_usd
-                                position_exit_reason = "stop_loss"
-                                break
+                                exitp, sold = self._order_manager.place_market_sell_order(symbol, qty)
+                                # Only log and exit if sell actually succeeded
+                                if sold > 0:
+                                    pnl = (exitp/entry - 1)*100.0
+                                    profit_usd = (exitp - entry) * sold
+                                    log_row([ts.isoformat(), symbol, "SELL_SL", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"Worker {wid} stop-loss", wid])
+                                    print(f"[SELL] W{wid} {symbol} SL @ {exitp:.6f} | P&L: {pnl:+.2f}%")
+                                    self._last_sell_time[symbol] = now_utc()
+                                    self._update_state(wid, last_pnl=pnl)
+                                    self._performance_metrics['total_sell_orders'] += 1
+                                    self._performance_metrics['total_profit_usd'] += profit_usd
+                                    position_exit_reason = "stop_loss"
+                                    break
+                                else:
+                                    print(f"[ERROR] W{wid} Failed to sell {symbol} for stop-loss, continuing position monitoring")
+                                    continue
 
                             # Trailing stop
                             elif trailing and price <= peak * (1.0 - TUNABLE_PARAMS['trail_giveback_pct'] / 100.0):
                                 self._update_state(wid, status="selling", note=f"Trailing stop")
-                                exitp, sold = market_sell_qty(client, symbol, qty)
-                                pnl = (exitp/entry - 1)*100.0
-                                profit_usd = (exitp - entry) * sold
-                                log_row([ts.isoformat(), symbol, "SELL_TRAIL", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"Worker {wid} trailing stop", wid])
-                                print(f"[SELL] W{wid} {symbol} TRAIL @ {exitp:.6f} | P&L: {pnl:+.2f}%")
-                                self._last_sell_time[symbol] = now_utc()
-                                self._update_state(wid, last_pnl=pnl)
-                                self._performance_metrics['total_sell_orders'] += 1
-                                self._performance_metrics['total_profit_usd'] += profit_usd
-                                position_exit_reason = "trailing_stop"
-                                break
+                                exitp, sold = self._order_manager.place_market_sell_order(symbol, qty)
+                                # Only log and exit if sell actually succeeded
+                                if sold > 0:
+                                    pnl = (exitp/entry - 1)*100.0
+                                    profit_usd = (exitp - entry) * sold
+                                    log_row([ts.isoformat(), symbol, "SELL_TRAIL", f"{exitp:.8f}", f"{sold:.8f}", f"{pnl:.4f}", f"Worker {wid} trailing stop", wid])
+                                    print(f"[SELL] W{wid} {symbol} TRAIL @ {exitp:.6f} | P&L: {pnl:+.2f}%")
+                                    self._last_sell_time[symbol] = now_utc()
+                                    self._update_state(wid, last_pnl=pnl)
+                                    self._performance_metrics['total_sell_orders'] += 1
+                                    self._performance_metrics['total_profit_usd'] += profit_usd
+                                    position_exit_reason = "trailing_stop"
+                                    break
+                                else:
+                                    print(f"[ERROR] W{wid} Failed to sell {symbol} for trailing stop, continuing position monitoring")
+                                    continue
 
                             time.sleep(POLL_SECONDS_ACTIVE)
 
@@ -1940,7 +2176,7 @@ class FastCycleBot:
                 'min_day_volatility_pct': TUNABLE_PARAMS['min_day_volatility_pct'],
                 'volume_multiplier': TUNABLE_PARAMS['vol_mult'],
                 'ema_strictness': TUNABLE_PARAMS['ema_relax'],
-                'buying_pattern': TUNABLE_PARAMS.get('buying_pattern', 1),
+                'buying_pattern': TUNABLE_PARAMS['buying_pattern'],
                 'cooldown_minutes': TUNABLE_PARAMS['cooldown_minutes'],
                 'reversal_threshold_pct': TUNABLE_PARAMS['reversal_threshold_pct']
             }
@@ -2307,6 +2543,23 @@ def api_console_clear():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.post("/api/refresh-filters")
+def api_refresh_filters():
+    """Manually refresh symbol filters cache"""
+    try:
+        bot_instance = get_bot_instance()
+        if hasattr(bot_instance, '_order_manager'):
+            # Clear filter cache
+            bot_instance._order_manager._filter_cache.clear()
+            bot_instance._order_manager._cache_timestamp.clear()
+            print("[API] Symbol filters cache cleared")
+            return jsonify({"status": "filters_refreshed", "message": "Symbol filters cache cleared"})
+        else:
+            return jsonify({"error": "Order manager not initialized"}), 400
+    except Exception as e:
+        print(f"[API] Refresh filters ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.post("/api/reconnect-api")
 def api_reconnect():
     try:
@@ -2365,6 +2618,62 @@ def api_reconnect():
 
     except Exception as e:
         print(f"[API] Reconnect ERROR: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.post("/api/test-order-validation")
+def api_test_order_validation():
+    """Test order validation without placing actual orders"""
+    try:
+        bot_instance = get_bot_instance()
+        data = request.get_json() or {}
+
+        symbol = data.get('symbol', 'ADAUSDT')
+        quote_amount = float(data.get('quote_amount', 20.0))
+
+        if not hasattr(bot_instance, '_order_manager'):
+            return jsonify({"error": "Order manager not initialized"}), 400
+
+        order_manager = bot_instance._order_manager
+
+        # Test filter fetching
+        filter_data = order_manager._get_symbol_filters(symbol, "spot")
+        step_size, min_qty, max_qty = order_manager._get_step_size(symbol, "MARKET", "spot")
+        tick_size, min_price, max_price = order_manager._get_tick_size(symbol, "spot")
+        min_notional = order_manager._get_min_notional(symbol, "spot")
+
+        # Test quantity calculation
+        reference_price = order_manager._get_reference_price(symbol)
+        raw_qty = Decimal(str(quote_amount)) / reference_price
+        rounded_qty = order_manager._round_quantity_to_step(raw_qty, step_size)
+        qty_str = order_manager._format_quantity(rounded_qty, step_size)
+
+        # Validate notional
+        notional_value = reference_price * rounded_qty
+        notional_ok = notional_value >= min_notional
+
+        return jsonify({
+            "symbol": symbol,
+            "quote_amount": quote_amount,
+            "filters": {
+                "step_size": str(step_size),
+                "min_qty": str(min_qty),
+                "max_qty": str(max_qty),
+                "tick_size": str(tick_size),
+                "min_notional": str(min_notional)
+            },
+            "calculations": {
+                "reference_price": str(reference_price),
+                "raw_qty": str(raw_qty),
+                "rounded_qty": str(rounded_qty),
+                "qty_string": qty_str,
+                "notional_value": str(notional_value),
+                "notional_ok": notional_ok
+            },
+            "validation": "PASS" if notional_ok and rounded_qty >= min_qty else "FAIL"
+        })
+
+    except Exception as e:
+        print(f"[API] Test order validation ERROR: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.get("/api/server-info")
